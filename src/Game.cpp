@@ -433,6 +433,16 @@ void Game::init() {
                         game::Control rc;
                         if (parseInputMsg(msg, rid, rc)) {
                             world.setRemoteControl(rid, rc);
+                            if (replayRecording) {
+                                game::ReplayData::RemoteInput ri;
+                                ri.t = static_cast<float>(world.clock());
+                                ri.id = rid;
+                                ri.mx = static_cast<float>(rc.move.x);
+                                ri.mz = static_cast<float>(rc.move.z);
+                                ri.interact = rc.interact;
+                                ri.sprint = rc.sprint;
+                                replayRec.remotes.push_back(ri);
+                            }
                         }
                     }
                 }
@@ -545,6 +555,7 @@ void Game::init() {
             world.bindLocalPlayer(0);
             world.setPrediction(false);
             replayIndex = 0;
+            remoteIndex = 0;
             replayFinished = false;
             renderer.setTutorialMarker(false, 0.0, 0.0);
         },
@@ -566,6 +577,16 @@ void Game::init() {
                 world.applySnapshot(nf.data);
                 world.smoothNetwork(nf.dt);
                 return;
+            }
+
+            while (remoteIndex < replayPlay.remotes.size() &&
+                   replayPlay.remotes[remoteIndex].t <= static_cast<float>(world.clock()) + 1e-4f) {
+                const game::ReplayData::RemoteInput& ri = replayPlay.remotes[remoteIndex++];
+                game::Control rc;
+                rc.move = game::Vec3{ri.mx, 0.0, ri.mz};
+                rc.interact = ri.interact;
+                rc.sprint = ri.sprint;
+                world.setRemoteControl(ri.id, rc);
             }
 
             if (replayIndex >= replayPlay.frames.size()) {

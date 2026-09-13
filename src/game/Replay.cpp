@@ -26,6 +26,11 @@ bool ReplayData::save(const std::string& path) const {
         std::snprintf(buf, sizeof(buf), "N|%.5f|", nf.dt);
         file << buf << nf.data << "\n";
     }
+    for (const auto& r : remotes) {
+        std::snprintf(buf, sizeof(buf), "M|%.3f|%d|%.3f|%.3f|%d|%d", r.t, r.id, r.mx, r.mz,
+                      r.interact ? 1 : 0, r.sprint ? 1 : 0);
+        file << buf << "\n";
+    }
     return true;
 }
 
@@ -35,6 +40,7 @@ bool ReplayData::load(const std::string& path) {
 
     frames.clear();
     netFrames.clear();
+    remotes.clear();
     network = false;
     std::string line;
     while (std::getline(file, line)) {
@@ -83,6 +89,16 @@ bool ReplayData::load(const std::string& path) {
             nf.dt = std::stof(tok);
             std::getline(ss, nf.data);
             netFrames.push_back(nf);
+        } else if (tag == "M") {
+            RemoteInput r;
+            std::string tok;
+            std::getline(ss, tok, '|'); r.t = std::stof(tok);
+            std::getline(ss, tok, '|'); r.id = std::atoi(tok.c_str());
+            std::getline(ss, tok, '|'); r.mx = std::stof(tok);
+            std::getline(ss, tok, '|'); r.mz = std::stof(tok);
+            std::getline(ss, tok, '|'); r.interact = std::atoi(tok.c_str()) != 0;
+            std::getline(ss, tok); r.sprint = std::atoi(tok.c_str()) != 0;
+            remotes.push_back(r);
         }
     }
     return !frames.empty() || !netFrames.empty();

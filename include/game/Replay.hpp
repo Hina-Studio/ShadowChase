@@ -35,6 +35,16 @@ struct ReplayData {
     };
     std::vector<NetFrame> netFrames;
 
+    struct RemoteInput {
+        float t = 0.0f;
+        int id = -1;
+        float mx = 0.0f;
+        float mz = 0.0f;
+        bool interact = false;
+        bool sprint = false;
+    };
+    std::vector<RemoteInput> remotes;
+
     bool save(const std::string& path) const;
     bool load(const std::string& path);
 };

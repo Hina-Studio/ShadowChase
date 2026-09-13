@@ -81,6 +81,7 @@ private:
     game::ReplayData replayPlay;
     bool replayRecording = false;
     size_t replayIndex = 0;
+    size_t remoteIndex = 0;
     bool replayFinished = false;
 
     void logMatch();
