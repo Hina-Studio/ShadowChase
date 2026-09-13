@@ -7,3 +7,4 @@ packaging/steam_output/
 packaging/steam_content/
 packaging/*.vdf
 !packaging/*.vdf.template
+.github/workflows/
