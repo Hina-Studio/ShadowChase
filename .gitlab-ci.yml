@@ -1,0 +1,26 @@
+stages:
+  - build
+  - test
+
+build-linux:
+  stage: build
+  image: ubuntu:22.04
+  before_script:
+    - apt-get update && apt-get install -y cmake g++ ninja-build git
+  script:
+    - cmake -S . -B build -G Ninja -DSLASHCO_ENABLE_RAYLIB=OFF -DCMAKE_BUILD_TYPE=Release
+    - cmake --build build
+  artifacts:
+    paths:
+      - build/SlashCoVR
+      - build/config.ini
+
+bench-linux:
+  stage: test
+  needs:
+    - build-linux
+  script:
+    - printf "bench.matches=50\nbench.selftest=1\nmap.rotation=Factory,Farmyard,HighSchool,Hospital,Research,Mansion,Subway\nkiller.types=Stalker,Whisper,Herd\n" >> build/config.ini
+    - ./build/SlashCoVR | tee bench.log
+    - grep -q "Selftest: PASS" bench.log
+    - grep -q "Benchmark summary" bench.log

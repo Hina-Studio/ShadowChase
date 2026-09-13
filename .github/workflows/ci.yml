@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux-bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DSLASHCO_ENABLE_RAYLIB=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Benchmark and selftest
+        run: |
+          {
+            echo "bench.matches=50"
+            echo "bench.selftest=1"
+            echo "map.rotation=Factory,Farmyard,HighSchool,Hospital,Research,Mansion,Subway"
+            echo "killer.types=Stalker,Whisper,Herd"
+          } >> build/config.ini
+          ./build/SlashCoVR | tee bench.log
+          grep -q "Selftest: PASS" bench.log
+          grep -q "Benchmark summary" bench.log
+
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DSLASHCO_ENABLE_RAYLIB=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Benchmark and selftest
+        shell: pwsh
+        run: |
+          Add-Content build\config.ini "bench.matches=20`nbench.selftest=1"
+          & build\Release\SlashCoVR.exe | Tee-Object bench.log
+          if (-not (Select-String -Path bench.log -Pattern "Selftest: PASS" -Quiet)) { throw "selftest failed" }
+          if (-not (Select-String -Path bench.log -Pattern "Benchmark summary" -Quiet)) { throw "benchmark failed" }

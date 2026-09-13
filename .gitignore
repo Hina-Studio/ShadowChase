@@ -1,0 +1,9 @@
+build/
+*.o
+*.obj
+replays/
+profile.dat
+packaging/steam_output/
+packaging/steam_content/
+packaging/*.vdf
+!packaging/*.vdf.template

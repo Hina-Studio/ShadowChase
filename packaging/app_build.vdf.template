@@ -1,0 +1,17 @@
+"appbuild"
+{
+  "appid" "APPID_PLACEHOLDER"
+  "desc" "Shadow Chase automated build"
+  "buildoutput" "steam_output"
+  "contentroot" "steam_content"
+  "setlive" ""
+  "preview" "0"
+  "local" ""
+  "depots"
+  {
+    "DEPOTID_PLACEHOLDER"
+    {
+      "file" "depot_build.vdf"
+    }
+  }
+}
