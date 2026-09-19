@@ -2,7 +2,7 @@ stages:
   - build
   - test
 
-build-linux:
+build-server:
   stage: build
   image: ubuntu:22.04
   before_script:
@@ -12,15 +12,13 @@ build-linux:
     - cmake --build build
   artifacts:
     paths:
-      - build/SlashCoVR
+      - build/SlashCoServer
       - build/config.ini
 
-bench-linux:
+selftest:
   stage: test
   needs:
-    - build-linux
+    - build-server
   script:
-    - printf "bench.matches=50\nbench.selftest=1\nmap.rotation=Factory,Farmyard,HighSchool,Hospital,Research,Mansion,Subway\nkiller.types=Stalker,Whisper,Herd\n" >> build/config.ini
-    - ./build/SlashCoVR | tee bench.log
-    - grep -q "Selftest: PASS" bench.log
-    - grep -q "Benchmark summary" bench.log
+    - ./build/SlashCoServer --selftest 3 | tee selftest.log
+    - grep -q "\[SELFTEST\] PASS" selftest.log

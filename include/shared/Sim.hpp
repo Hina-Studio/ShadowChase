@@ -1,0 +1,74 @@
+#pragma once
+#include <string>
+#include <vector>
+
+#include "shared/Math.hpp"
+
+namespace sc {
+struct Block {
+    int x = 0;
+    int z = 0;
+};
+
+struct PlayerState {
+    int id = -1;
+    std::string name;
+    Vec2 pos;
+    double yaw = 0.0;
+    double hp = 100.0;
+    bool sprinting = false;
+    bool interact = false;
+    bool alive = true;
+};
+
+struct InputCmd {
+    double moveX = 0.0;
+    double moveZ = 0.0;
+    double yaw = 0.0;
+    bool sprint = false;
+    bool interact = false;
+    unsigned int seq = 0;
+};
+
+constexpr double kPlayerRadius = 0.35;
+constexpr double kWalkSpeed = 4.2;
+constexpr double kSprintSpeed = 6.8;
+
+InputCmd sanitizeInput(const InputCmd& in);
+
+class Sim {
+public:
+    void generate(unsigned int seed, int size);
+    int addPlayer(const std::string& name);
+    void removePlayer(int id);
+    void setInput(int id, const InputCmd& cmd);
+    void step(double dt);
+
+    const std::vector<PlayerState>& players() const { return players_; }
+    const std::vector<Block>& blocks() const { return blocks_; }
+    const std::vector<Vec2>& spawns() const { return spawns_; }
+    int size() const { return size_; }
+    unsigned int seed() const { return seed_; }
+    unsigned int tick() const { return tick_; }
+
+    bool blocked(int x, int z) const;
+    bool blockedAt(const Vec2& p) const;
+
+    static bool blockedCell(const std::vector<unsigned char>& grid, int size, double x, double z);
+    static void moveOnGrid(Vec2& pos, const Vec2& dir, double speed, double dt,
+                           const std::vector<unsigned char>& grid, int size);
+
+private:
+    void movePlayer(PlayerState& p, const InputCmd& cmd, double dt);
+    bool blockedOnAxis(double x, double z) const;
+
+    int size_ = 48;
+    unsigned int seed_ = 0;
+    unsigned int tick_ = 0;
+    std::vector<Block> blocks_;
+    std::vector<Vec2> spawns_;
+    std::vector<PlayerState> players_;
+    std::vector<InputCmd> inputs_;
+    std::vector<unsigned char> grid_;
+};
+}
