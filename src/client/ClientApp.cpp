@@ -566,6 +566,11 @@ void ClientApp::run() {
         updateLocal(dt);
         render();
     }
+    if (quit_) {
+        core::Logger::info("[CLIENT] exiting (quit flag)");
+    } else {
+        core::Logger::info("[CLIENT] exiting (window close)");
+    }
 }
 
 void ClientApp::shutdown() {
