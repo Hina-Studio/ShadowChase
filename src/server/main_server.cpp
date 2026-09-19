@@ -1,3 +1,18 @@
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOGDI
+#define NOGDI
+#endif
+#ifndef NOUSER
+#define NOUSER
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -46,6 +61,8 @@ public:
             return false;
         }
         sim_.generate(seed, mapSize);
+        core::Logger::info("[SERVER] layout: " + sim_.layoutReason() + " fuelCans=" +
+                           std::to_string(sim_.fuelCansInWorld()));
         core::Logger::info("[SERVER] listening port=" + std::to_string(port) + " room=" +
                            std::to_string(roomCode_) + " seed=" + std::to_string(seed) +
                            " map=" + std::to_string(mapSize) + " aoi=" +
@@ -85,10 +102,25 @@ public:
     }
 
     void tickOnce(double dt) {
-        double acc = 0.0;
         sim_.step(dt);
+        if (!gensPowered_ && sim_.generatorsPowered()) {
+            gensPowered_ = true;
+            core::Logger::info("[SERVER] all generators powered - vehicle unlocked");
+        }
+        int vehicleCharge = 0;
+        for (const auto& o : sim_.objects()) {
+            if (o.type == sc::ObjType::Vehicle) vehicleCharge = o.charge;
+        }
+        if (vehicleCharge > vehicleCharge_) {
+            vehicleCharge_ = vehicleCharge;
+            core::Logger::info("[SERVER] vehicle fuel " + std::to_string(vehicleCharge_) + "/" +
+                               std::to_string(sc::kVehicleFuelNeed));
+        }
+        if (status_ == 0 && sim_.status() == 1) {
+            status_ = 1;
+            core::Logger::info("[SERVER] extraction complete");
+        }
         broadcastSnapshot();
-        (void)acc;
     }
 
     void step(double dt) {
@@ -159,6 +191,7 @@ private:
                 wo.open = o.open;
                 wo.taken = o.taken;
                 wo.holder = o.holder;
+                wo.charge = o.charge;
                 welcome.objects.push_back(wo);
             }
             auto payload = sc::encodeWelcome(welcome);
@@ -205,6 +238,9 @@ private:
             so.flags = 0;
             if (o.open) so.flags |= 0x01;
             if (o.taken) so.flags |= 0x02;
+            so.charge = static_cast<uint8_t>(std::max(0, std::min(255, o.charge)));
+            so.progress = static_cast<uint8_t>(std::max(
+                0.0f, std::min(255.0f, o.progress / static_cast<float>(sc::kChannelTime) * 255.0f)));
             objects.push_back(so);
         }
         std::vector<sc::SnapshotMonster> monsters;
@@ -237,6 +273,7 @@ private:
 
             sc::Snapshot snap;
             snap.tick = sim_.tick();
+            snap.status = static_cast<uint8_t>(sim_.status());
             snap.baseline = baselineTick || !link.sentOnce;
 
             if (snap.baseline) {
@@ -294,6 +331,9 @@ private:
     uint32_t roomCode_ = 0;
     double aoiRadius_ = 0.0;
     sc::Sim sim_;
+    bool gensPowered_ = false;
+    int vehicleCharge_ = 0;
+    int status_ = 0;
     std::unordered_map<int, ClientLink> clients_;
     double accumulator_ = 0.0;
 };
@@ -499,6 +539,95 @@ int runSelfTest(int port, double seconds) {
     server.shutdown();
     return ok ? 0 : 1;
 }
+bool runQuestSelfTest() {
+    sc::Sim sim;
+    sim.generate(777u, 48);
+    int pid = sim.addPlayer("QuestBot");
+
+    auto stepN = [&](int n) {
+        for (int i = 0; i < n; ++i) sim.step(0.05);
+    };
+    auto setInteract = [&](bool held) {
+        sc::InputCmd c;
+        c.interact = held;
+        sim.setInput(pid, c);
+    };
+    auto grabCan = [&]() -> bool {
+        for (const auto& o : sim.objects()) {
+            if (o.type != sc::ObjType::FuelCan || o.taken || o.holder >= 0) continue;
+            sim.debugTeleportPlayer(pid, o.pos.x, o.pos.z);
+            setInteract(true);
+            sim.step(0.05);
+            setInteract(false);
+            sim.step(0.05);
+            return true;
+        }
+        return false;
+    };
+    auto isCarryingCan = [&]() -> bool {
+        for (const auto& o : sim.objects()) {
+            if (o.id >= 0 && o.type == sc::ObjType::FuelCan && o.holder == pid) return true;
+        }
+        return false;
+    };
+    auto channelAt = [&](sc::ObjType targetType, int maxSteps) -> bool {
+        const sc::SimObject* target = nullptr;
+        for (const auto& o : sim.objects()) {
+            if (o.type != targetType) continue;
+            if (targetType == sc::ObjType::Generator && o.charge >= sc::kGeneratorFuelNeed) continue;
+            if (targetType == sc::ObjType::Vehicle && o.charge >= sc::kVehicleFuelNeed) continue;
+            target = &o;
+            break;
+        }
+        if (!target) return false;
+        sim.debugTeleportPlayer(pid, target->pos.x, target->pos.z);
+        setInteract(true);
+        for (int i = 0; i < maxSteps; ++i) {
+            sim.step(0.05);
+            if (!isCarryingCan()) break;
+        }
+        setInteract(false);
+        sim.step(0.05);
+        return true;
+    };
+
+    for (int i = 0; i < 2; ++i) {
+        if (!grabCan()) return false;
+        if (!channelAt(sc::ObjType::Generator, 60)) return false;
+    }
+    if (!sim.generatorsPowered()) {
+        core::Logger::error("[QUEST] generators not powered");
+        return false;
+    }
+    for (int i = 0; i < sc::kVehicleFuelNeed; ++i) {
+        if (!grabCan()) return false;
+        if (!channelAt(sc::ObjType::Vehicle, 60)) return false;
+    }
+
+    const sc::SimObject* vehicle = nullptr;
+    for (const auto& o : sim.objects()) {
+        if (o.type == sc::ObjType::Vehicle) vehicle = &o;
+    }
+    if (!vehicle || vehicle->charge < sc::kVehicleFuelNeed) {
+        core::Logger::error("[QUEST] vehicle not fueled");
+        return false;
+    }
+    sim.debugTeleportPlayer(pid, vehicle->pos.x, vehicle->pos.z);
+    stepN(40);
+
+    bool extracted = false;
+    for (const auto& p : sim.players()) {
+        if (p.id == pid && p.extracted) extracted = true;
+    }
+    bool ok = extracted && sim.status() == 1;
+    core::Logger::info(std::string("[QUEST] ") + (ok ? "PASS" : "FAIL") + " fuelLeft=" +
+                       std::to_string(sim.fuelCansInWorld()) + " gensPowered=" +
+                       std::string(sim.generatorsPowered() ? "1" : "0") + " vehicle=" +
+                       std::to_string(vehicle->charge) + " extracted=" +
+                       std::string(extracted ? "1" : "0") + " status=" +
+                       std::to_string(sim.status()));
+    return ok;
+}
 }
 
 int main(int argc, char** argv) {
@@ -534,7 +663,9 @@ int main(int argc, char** argv) {
     }
 
     if (selftest > 0.0) {
-        return runSelfTest(port, selftest);
+        bool questOk = runQuestSelfTest();
+        int netResult = runSelfTest(port, selftest);
+        return (questOk && netResult == 0) ? 0 : 1;
     }
 
     Server server;

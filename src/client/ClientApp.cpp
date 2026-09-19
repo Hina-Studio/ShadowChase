@@ -165,6 +165,7 @@ void ClientApp::handleEvents() {
                 sc::Snapshot snap;
                 if (sc::decodeSnapshot(event.packet->data, event.packet->dataLength, snap)) {
                     serverTick_ = snap.tick;
+                    serverStatus_ = snap.status;
                     if (snap.baseline) {
                         netPlayers_.clear();
                         netObjects_.clear();
@@ -207,13 +208,13 @@ void ClientApp::sendInput(double dt) {
     double fwd = (IsKeyDown(KEY_W) ? 1.0 : 0.0) - (IsKeyDown(KEY_S) ? 1.0 : 0.0);
     double side = (IsKeyDown(KEY_D) ? 1.0 : 0.0) - (IsKeyDown(KEY_A) ? 1.0 : 0.0);
     bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
-    bool interact = IsKeyPressed(KEY_E);
+    bool interact = IsKeyDown(KEY_E);
 
     if (IsGamepadAvailable(0)) {
         fwd += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_Y) * -1.0;
         side += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
         sprint = sprint || IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_2);
-        interact = interact || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+        interact = interact || IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
         dbg_.padActive = true;
     } else {
         dbg_.padActive = false;
@@ -290,30 +291,72 @@ void ClientApp::updateLocal(double dt) {
 }
 
 std::string ClientApp::interactionPrompt() const {
+    bool carryingCan = false;
+    bool anyGen = false;
+    bool gensPowered = true;
+    int vehicleCharge = -1;
+    for (const auto& kv : netObjects_) {
+        const sc::SnapshotObject& o = kv.second;
+        if (o.type == static_cast<uint8_t>(sc::ObjType::FuelCan) && o.holder == playerId_) {
+            carryingCan = true;
+        }
+        if (o.type == static_cast<uint8_t>(sc::ObjType::Generator)) {
+            anyGen = true;
+            if (o.charge < 1) gensPowered = false;
+        }
+        if (o.type == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
+            vehicleCharge = o.charge;
+        }
+    }
+    if (!anyGen) gensPowered = false;
+
     double fx = std::sin(yaw_);
     double fz = std::cos(yaw_);
     const sc::SnapshotObject* best = nullptr;
-    double bestD = 1.9;
+    double bestD = 2.2;
     for (const auto& kv : netObjects_) {
         const sc::SnapshotObject& o = kv.second;
         double dx = o.x - predicted_.x;
         double dz = o.z - predicted_.z;
         double d = std::sqrt(dx * dx + dz * dz);
         if (d > bestD) continue;
-        if (dx * fx + dz * fz < 0.0) continue;
+        if (dx * fx + dz * fz < -0.2) continue;
         if (o.type == static_cast<uint8_t>(sc::ObjType::Pickup) && (o.flags & 0x02)) continue;
+        if (o.type == static_cast<uint8_t>(sc::ObjType::FuelCan) &&
+            ((o.flags & 0x02) || o.holder >= 0)) {
+            continue;
+        }
         best = &o;
         bestD = d;
     }
-    if (!best) return "";
-    if (best->type == static_cast<uint8_t>(sc::ObjType::Door)) {
-        return (best->flags & 0x01) ? "[E] close door" : "[E] open door";
+
+    if (best) {
+        uint8_t t = best->type;
+        if (t == static_cast<uint8_t>(sc::ObjType::Door)) {
+            return (best->flags & 0x01) ? "[E] close door" : "[E] open door";
+        }
+        if (t == static_cast<uint8_t>(sc::ObjType::Crate)) {
+            return best->holder == playerId_ ? "[E] drop crate" : "[E] carry crate (slower)";
+        }
+        if (t == static_cast<uint8_t>(sc::ObjType::Pickup)) {
+            return "[E] pick up supplies (+40 hp, +12 ammo)";
+        }
+        if (t == static_cast<uint8_t>(sc::ObjType::FuelCan)) {
+            return "[E] pick up fuel can";
+        }
+        if (t == static_cast<uint8_t>(sc::ObjType::Generator)) {
+            if (best->charge >= 1) return "generator online";
+            return carryingCan ? "[HOLD E] refuel generator" : "generator needs a fuel can";
+        }
+        if (t == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
+            if (!gensPowered) return "vehicle locked - power the generators first";
+            if (best->charge >= 2) return "EVACUATION ACTIVE - stand in the ring";
+            return carryingCan ? "[HOLD E] load fuel (" + std::to_string(best->charge) + "/2)"
+                               : "vehicle needs fuel (" + std::to_string(best->charge) + "/2)";
+        }
     }
-    if (best->type == static_cast<uint8_t>(sc::ObjType::Crate)) {
-        if (best->holder == playerId_) return "[E] drop crate";
-        return "[E] carry crate (slower)";
-    }
-    return "[E] pick up supplies (+40 hp, +12 ammo)";
+    if (vehicleCharge >= 2) return "EVACUATION ACTIVE - stand in the ring";
+    return "";
 }
 
 void ClientApp::render() {
@@ -360,6 +403,24 @@ void ClientApp::render() {
             if ((o.flags & 0x02) != 0) continue;
             DrawSphere(Vector3{o.x, 0.45f, o.z}, 0.35f, Color{90, 230, 160, 255});
             DrawSphereWires(Vector3{o.x, 0.45f, o.z}, 0.35f, 8, 8, Color{30, 90, 60, 255});
+        } else if (type == static_cast<uint8_t>(sc::ObjType::FuelCan)) {
+            if ((o.flags & 0x02) != 0 || o.holder >= 0) continue;
+            DrawCube(Vector3{o.x, 0.35f, o.z}, 0.5f, 0.7f, 0.5f, Color{90, 160, 255, 255});
+            DrawCubeWires(Vector3{o.x, 0.35f, o.z}, 0.5f, 0.7f, 0.5f, Color{30, 60, 120, 255});
+        } else if (type == static_cast<uint8_t>(sc::ObjType::Generator)) {
+            bool powered = o.charge >= 1;
+            Color c = powered ? Color{90, 230, 120, 255} : Color{230, 200, 70, 255};
+            DrawCube(Vector3{o.x, 0.8f, o.z}, 1.2f, 1.6f, 1.2f, c);
+            DrawCubeWires(Vector3{o.x, 0.8f, o.z}, 1.2f, 1.6f, 1.2f, Color{60, 50, 20, 255});
+        } else if (type == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
+            bool ready = o.charge >= 2;
+            Color c = ready ? Color{90, 230, 120, 255} : Color{140, 140, 150, 255};
+            DrawCube(Vector3{o.x, 1.0f, o.z}, 2.4f, 2.0f, 1.6f, c);
+            DrawCubeWires(Vector3{o.x, 1.0f, o.z}, 2.4f, 2.0f, 1.6f, Color{40, 40, 45, 255});
+            if (ready) {
+                DrawCircle3D(Vector3{o.x, 0.05f, o.z}, 3.0f, Vector3{1.0f, 0.0f, 0.0f}, 90.0f,
+                             Color{90, 230, 120, 180});
+            }
         }
     }
 
@@ -403,6 +464,23 @@ void ClientApp::render() {
         dbg_.monsterX = kv.second.x;
         dbg_.monsterZ = kv.second.z;
     }
+    dbg_.fuelCans = 0;
+    dbg_.gensPowered = 0;
+    dbg_.vehicleCharge = 0;
+    dbg_.matchStatus = serverStatus_;
+    for (const auto& kv : netObjects_) {
+        const sc::SnapshotObject& o = kv.second;
+        if (o.type == static_cast<uint8_t>(sc::ObjType::FuelCan) && !(o.flags & 0x02) &&
+            o.holder < 0) {
+            dbg_.fuelCans += 1;
+        }
+        if (o.type == static_cast<uint8_t>(sc::ObjType::Generator)) {
+            if (o.charge >= 1) dbg_.gensPowered += 1;
+        }
+        if (o.type == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
+            dbg_.vehicleCharge = o.charge;
+        }
+    }
     dbg_.ownX = predicted_.x;
     dbg_.ownZ = predicted_.z;
     dbg_.connected = connected_;
@@ -428,6 +506,37 @@ void ClientApp::render() {
         int w = MeasureText(prompt.c_str(), 20);
         DrawText(prompt.c_str(), GetScreenWidth() / 2 - w / 2, GetScreenHeight() / 2 + 40, 20,
                  Color{255, 230, 140, 255});
+    }
+
+    {
+        const sc::SnapshotObject* channel = nullptr;
+        double bestD = 2.2;
+        for (const auto& kv : netObjects_) {
+            const sc::SnapshotObject& o = kv.second;
+            bool isChannel = (o.type == static_cast<uint8_t>(sc::ObjType::Generator) && o.charge < 1) ||
+                             (o.type == static_cast<uint8_t>(sc::ObjType::Vehicle) && o.charge < 2);
+            if (!isChannel) continue;
+            double dx = o.x - predicted_.x;
+            double dz = o.z - predicted_.z;
+            double d = std::sqrt(dx * dx + dz * dz);
+            if (d < bestD) {
+                bestD = d;
+                channel = &o;
+            }
+        }
+        if (channel && channel->progress > 0) {
+            float p = static_cast<float>(channel->progress) / 255.0f;
+            int bx = GetScreenWidth() / 2 - 100;
+            int by = GetScreenHeight() - 90;
+            DrawRectangle(bx, by, 200, 12, Color{0, 0, 0, 180});
+            DrawRectangle(bx, by, static_cast<int>(200 * p), 12, Color{90, 220, 130, 255});
+        }
+    }
+
+    if (serverStatus_ == 1) {
+        const char* done = "EXTRACTION COMPLETE";
+        int w = MeasureText(done, 30);
+        DrawText(done, GetScreenWidth() / 2 - w / 2, 60, 30, Color{90, 230, 120, 255});
     }
 
     DrawText("WASD move  SHIFT sprint  E interact  F1 panel  ESC quit", 12,

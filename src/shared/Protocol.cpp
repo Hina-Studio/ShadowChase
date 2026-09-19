@@ -154,6 +154,7 @@ std::vector<uint8_t> encodeWelcome(const WelcomeData& welcome) {
         if (o.taken) flags |= 0x02;
         w.u8(flags);
         w.i16(static_cast<int16_t>(o.holder));
+        w.u8(static_cast<uint8_t>(std::max(0, std::min(255, o.charge))));
     }
     return w.data();
 }
@@ -194,14 +195,16 @@ bool decodeWelcome(const uint8_t* data, size_t size, WelcomeData& welcome) {
         uint16_t id = 0;
         uint8_t flags = 0;
         int16_t holder = -1;
+        uint8_t charge = 0;
         if (!r.u16(id) || !r.u8(o.type) || !r.f32(o.x) || !r.f32(o.z) || !r.u8(flags) ||
-            !r.i16(holder)) {
+            !r.i16(holder) || !r.u8(charge)) {
             return false;
         }
         o.id = id;
         o.open = (flags & 0x01) != 0;
         o.taken = (flags & 0x02) != 0;
         o.holder = holder;
+        o.charge = charge;
         welcome.objects.push_back(o);
     }
     return true;
@@ -261,6 +264,7 @@ std::vector<uint8_t> encodeSnapshot(const Snapshot& snap) {
     w.u8(static_cast<uint8_t>(MsgType::Snapshot));
     w.u32(snap.tick);
     w.u8(snap.baseline ? 1 : 0);
+    w.u8(snap.status);
     w.u16(static_cast<uint16_t>(snap.players.size()));
     for (const auto& p : snap.players) {
         w.u16(static_cast<uint16_t>(p.id));
@@ -278,6 +282,8 @@ std::vector<uint8_t> encodeSnapshot(const Snapshot& snap) {
         w.i16(quantPos(o.z));
         w.u8(o.flags);
         w.i16(static_cast<int16_t>(o.holder));
+        w.u8(o.charge);
+        w.u8(o.progress);
     }
     w.u16(static_cast<uint16_t>(snap.monsters.size()));
     for (const auto& m : snap.monsters) {
@@ -295,10 +301,12 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
     uint8_t type = 0;
     uint32_t tick = 0;
     uint8_t baseline = 0;
+    uint8_t status = 0;
     if (!r.u8(type) || type != static_cast<uint8_t>(MsgType::Snapshot)) return false;
-    if (!r.u32(tick) || !r.u8(baseline)) return false;
+    if (!r.u32(tick) || !r.u8(baseline) || !r.u8(status)) return false;
     snap.tick = tick;
     snap.baseline = baseline != 0;
+    snap.status = status;
 
     uint16_t pcount = 0;
     if (!r.u16(pcount)) return false;
@@ -335,8 +343,10 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         int16_t qz = 0;
         uint8_t flags = 0;
         int16_t holder = -1;
+        uint8_t charge = 0;
+        uint8_t progress = 0;
         if (!r.u16(id) || !r.u8(otype) || !r.i16(qx) || !r.i16(qz) || !r.u8(flags) ||
-            !r.i16(holder)) {
+            !r.i16(holder) || !r.u8(charge) || !r.u8(progress)) {
             return false;
         }
         SnapshotObject o;
@@ -346,6 +356,8 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         o.z = static_cast<float>(dequantPos(qz));
         o.flags = flags;
         o.holder = holder;
+        o.charge = charge;
+        o.progress = progress;
         snap.objects.push_back(o);
     }
 

@@ -41,6 +41,10 @@ struct ClientDebugState {
     int monsterState = -1;
     double monsterX = 0.0;
     double monsterZ = 0.0;
+    int fuelCans = 0;
+    int gensPowered = 0;
+    int vehicleCharge = 0;
+    int matchStatus = 0;
     double ownX = 0.0;
     double ownZ = 0.0;
     float hp = 100.0f;
@@ -86,6 +90,7 @@ private:
     std::unordered_map<int, sc::SnapshotObject> netObjects_;
     std::unordered_map<int, sc::SnapshotMonster> netMonsters_;
     uint32_t serverTick_ = 0;
+    uint8_t serverStatus_ = 0;
 
     double inputTimer_ = 0.0;
     unsigned int seq_ = 0;

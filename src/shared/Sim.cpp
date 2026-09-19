@@ -81,54 +81,24 @@ void Sim::generate(unsigned int seed, int size) {
     }
 
     dynamicGrid_ = grid_;
-    objects_.clear();
-    auto freeSpot = [&](int& ox, int& oz) {
-        std::uniform_int_distribution<int> d(3, size_ - 4);
-        for (int tries = 0; tries < 64; ++tries) {
-            int x = d(rng);
-            int z = d(rng);
-            if (grid_[static_cast<size_t>(z) * static_cast<size_t>(size_) + static_cast<size_t>(x)] == 0) {
-                ox = x;
-                oz = z;
-                return true;
-            }
-        }
-        return false;
-    };
-
-    int nextId = 1;
-    for (int i = 0; i < 4; ++i) {
-        int x = 0;
-        int z = 0;
-        if (!freeSpot(x, z)) break;
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Door;
-        o.pos = Vec2{x + 0.5, z + 0.5};
-        objects_.push_back(o);
-    }
-    for (int i = 0; i < 6; ++i) {
-        int x = 0;
-        int z = 0;
-        if (!freeSpot(x, z)) break;
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Crate;
-        o.pos = Vec2{x + 0.5, z + 0.5};
-        objects_.push_back(o);
-    }
-    for (int i = 0; i < 6; ++i) {
-        int x = 0;
-        int z = 0;
-        if (!freeSpot(x, z)) break;
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Pickup;
-        o.pos = Vec2{x + 0.5, z + 0.5};
-        objects_.push_back(o);
-    }
-
     rng_.seed(seed ^ 0x5F3759DFu);
+
+    bool valid = false;
+    std::string reason;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        placeQuestObjects();
+        if (validateLayout(reason)) {
+            valid = true;
+            break;
+        }
+    }
+    if (!valid) {
+        applyFallback();
+        layoutReason_ = "fallback: " + reason;
+    } else {
+        layoutReason_ = "ok";
+    }
+
     monsters_.clear();
     {
         Vec2 spot = randomFreeSpot();
@@ -143,6 +113,287 @@ void Sim::generate(unsigned int seed, int size) {
         m.patrolTarget = randomFreeSpot();
         m.yaw = 0.0;
         monsters_.push_back(m);
+    }
+}
+
+void Sim::placeQuestObjects() {
+    objects_.clear();
+    vehicleId_ = -1;
+    status_ = 0;
+    int nextId = 1;
+
+    for (int i = 0; i < 4; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Door;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < 6; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Crate;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < 6; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Pickup;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kFuelCanTotal; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::FuelCan;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < 2; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Generator;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Vehicle;
+        o.pos = p;
+        objects_.push_back(o);
+        vehicleId_ = o.id;
+    }
+}
+
+bool Sim::reachableFrom(const Vec2& start, const Vec2& goal,
+                        const std::vector<unsigned char>& grid) const {
+    int sx = static_cast<int>(std::floor(start.x));
+    int sz = static_cast<int>(std::floor(start.z));
+    int gx = static_cast<int>(std::floor(goal.x));
+    int gz = static_cast<int>(std::floor(goal.z));
+    if (sx < 0 || sz < 0 || sx >= size_ || sz >= size_) return false;
+    if (gx < 0 || gz < 0 || gx >= size_ || gz >= size_) return false;
+
+    std::vector<unsigned char> seen(static_cast<size_t>(size_) * static_cast<size_t>(size_), 0);
+    std::vector<int> queue;
+    queue.push_back(sz * size_ + sx);
+    seen[static_cast<size_t>(sz) * static_cast<size_t>(size_) + static_cast<size_t>(sx)] = 1;
+    const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    size_t head = 0;
+    while (head < queue.size()) {
+        int cur = queue[head++];
+        int cx = cur % size_;
+        int cz = cur / size_;
+        if (cx == gx && cz == gz) return true;
+        for (const auto& d : dirs) {
+            int nx = cx + d[0];
+            int nz = cz + d[1];
+            if (nx < 0 || nz < 0 || nx >= size_ || nz >= size_) continue;
+            if (grid[static_cast<size_t>(nz) * static_cast<size_t>(size_) + static_cast<size_t>(nx)] != 0) {
+                continue;
+            }
+            size_t idx = static_cast<size_t>(nz) * static_cast<size_t>(size_) + static_cast<size_t>(nx);
+            if (seen[idx]) continue;
+            seen[idx] = 1;
+            queue.push_back(nz * size_ + nx);
+        }
+    }
+    return false;
+}
+
+bool Sim::validateLayout(std::string& reason) const {
+    int required = kGeneratorFuelNeed * 2 + kVehicleFuelNeed;
+    if (fuelCansInWorld() < (required * 13) / 10 + 1) {
+        reason = "fuel redundancy below 1.3x";
+        return false;
+    }
+
+    std::vector<unsigned char> passable = grid_;
+    for (const auto& o : objects_) {
+        if (o.type != ObjType::Door) continue;
+        int gx = static_cast<int>(std::floor(o.pos.x));
+        int gz = static_cast<int>(std::floor(o.pos.z));
+        if (gx < 0 || gz < 0 || gx >= size_ || gz >= size_) continue;
+        passable[static_cast<size_t>(gz) * static_cast<size_t>(size_) + static_cast<size_t>(gx)] = 0;
+    }
+
+    const SimObject* vehicle = nullptr;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::Vehicle) vehicle = &o;
+    }
+    if (!vehicle) {
+        reason = "no vehicle";
+        return false;
+    }
+    for (const auto& s : spawns_) {
+        if (!reachableFrom(s, vehicle->pos, passable)) {
+            reason = "spawn cannot reach vehicle";
+            return false;
+        }
+    }
+    for (const auto& o : objects_) {
+        if (o.type != ObjType::Generator && o.type != ObjType::FuelCan) continue;
+        bool anySpawn = false;
+        for (const auto& s : spawns_) {
+            if (reachableFrom(s, o.pos, passable)) {
+                anySpawn = true;
+                break;
+            }
+        }
+        if (!anySpawn) {
+            reason = "objective unreachable";
+            return false;
+        }
+    }
+    return true;
+}
+
+void Sim::applyFallback() {
+    objects_.clear();
+    vehicleId_ = -1;
+    status_ = 0;
+    int nextId = 1;
+    for (int i = 0; i < 6; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Crate;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kFuelCanTotal; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::FuelCan;
+        o.pos = spawns_.empty() ? randomFreeSpot()
+                                : spawns_[static_cast<size_t>(i) % spawns_.size()];
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < 2; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Generator;
+        o.pos = spawns_.empty() ? randomFreeSpot()
+                                : spawns_[static_cast<size_t>(i + 2) % spawns_.size()];
+        objects_.push_back(o);
+    }
+    {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Vehicle;
+        o.pos = spawns_.empty() ? Vec2{size_ / 2.0, size_ / 2.0} : spawns_[0];
+        objects_.push_back(o);
+        vehicleId_ = o.id;
+    }
+}
+
+bool Sim::generatorsPowered() const {
+    int gens = 0;
+    for (const auto& o : objects_) {
+        if (o.type != ObjType::Generator) continue;
+        ++gens;
+        if (o.charge < kGeneratorFuelNeed) return false;
+    }
+    return gens > 0;
+}
+
+int Sim::fuelCansInWorld() const {
+    int count = 0;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::FuelCan && !o.taken) ++count;
+    }
+    return count;
+}
+
+void Sim::debugTeleportPlayer(int id, double x, double z) {
+    if (id < 0 || id >= static_cast<int>(players_.size())) return;
+    players_[static_cast<size_t>(id)].pos = Vec2{x, z};
+}
+
+void Sim::updateObjectives(double dt) {
+    const SimObject* vehicle = nullptr;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::Vehicle) vehicle = &o;
+    }
+
+    for (auto& p : players_) {
+        if (!p.alive || p.extracted) continue;
+        InputCmd& cmd = inputs_[static_cast<size_t>(p.id)];
+        int carriedCan = -1;
+        for (const auto& o : objects_) {
+            if (o.id == p.carrying && o.type == ObjType::FuelCan && !o.taken) carriedCan = o.id;
+        }
+
+        if (cmd.interact && carriedCan >= 0) {
+            for (auto& g : objects_) {
+                if (g.type != ObjType::Generator || g.charge >= kGeneratorFuelNeed) continue;
+                if (p.pos.distance(g.pos) > 1.9) continue;
+                g.progress += static_cast<float>(dt);
+                if (g.progress >= kChannelTime) {
+                    g.progress = 0.0f;
+                    g.charge += 1;
+                    for (auto& o : objects_) {
+                        if (o.id == carriedCan) {
+                            o.taken = true;
+                            o.holder = -1;
+                        }
+                    }
+                    p.carrying = -1;
+                }
+                break;
+            }
+            if (generatorsPowered() && vehicle && vehicle->charge < kVehicleFuelNeed &&
+                p.pos.distance(vehicle->pos) <= 2.2) {
+                SimObject* v = nullptr;
+                for (auto& o : objects_) {
+                    if (o.type == ObjType::Vehicle) v = &o;
+                }
+                if (v) {
+                    v->progress += static_cast<float>(dt);
+                    if (v->progress >= kChannelTime) {
+                        v->progress = 0.0f;
+                        v->charge += 1;
+                        for (auto& o : objects_) {
+                            if (o.id == carriedCan) {
+                                o.taken = true;
+                                o.holder = -1;
+                            }
+                        }
+                        p.carrying = -1;
+                    }
+                }
+            }
+        }
+
+        if (vehicle && vehicle->charge >= kVehicleFuelNeed &&
+            p.pos.distance(vehicle->pos) <= kExtractRange) {
+            p.extractTimer += dt;
+            if (p.extractTimer >= kExtractTime) {
+                p.extracted = true;
+            }
+        } else {
+            p.extractTimer = 0.0;
+        }
+    }
+
+    bool anyActive = false;
+    for (const auto& p : players_) {
+        if (p.alive && !p.extracted) anyActive = true;
+    }
+    if (!anyActive && !players_.empty() && status_ == 0) {
+        bool anyExtracted = false;
+        for (const auto& p : players_) {
+            if (p.extracted) anyExtracted = true;
+        }
+        if (anyExtracted) status_ = 1;
     }
 }
 
@@ -340,8 +591,12 @@ void Sim::handleInteract(PlayerState& p) {
     for (auto& o : objects_) {
         if (o.id == p.carrying) continue;
         if (o.type == ObjType::Pickup && o.taken) continue;
-        if (o.type == ObjType::Crate && o.holder >= 0 && o.holder != p.id) continue;
-        if (o.type == ObjType::Crate && p.carrying >= 0) continue;
+        if (o.type == ObjType::FuelCan && o.taken) continue;
+        if ((o.type == ObjType::Crate || o.type == ObjType::FuelCan) && o.holder >= 0 &&
+            o.holder != p.id) {
+            continue;
+        }
+        if ((o.type == ObjType::Crate || o.type == ObjType::FuelCan) && p.carrying >= 0) continue;
         double d = p.pos.distance(o.pos);
         if (d < bestD) {
             bestD = d;
@@ -365,7 +620,7 @@ void Sim::handleInteract(PlayerState& p) {
         best->taken = true;
         p.hp = std::min(100.0, p.hp + 40.0);
         p.ammo += 12;
-    } else if (best->type == ObjType::Crate) {
+    } else if (best->type == ObjType::Crate || best->type == ObjType::FuelCan) {
         if (p.carrying < 0) {
             best->holder = p.id;
             p.carrying = best->id;
@@ -396,6 +651,7 @@ void Sim::step(double dt) {
         movePlayer(p, cmd, dt);
         p.lastSpeed = p.pos.distance(p.prevPos) / dt;
     }
+    updateObjectives(dt);
     updateMonsters(dt);
 }
 }

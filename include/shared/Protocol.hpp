@@ -36,6 +36,8 @@ struct SnapshotObject {
     float z = 0.0f;
     uint8_t flags = 0;
     int holder = -1;
+    uint8_t charge = 0;
+    uint8_t progress = 0;
 };
 
 struct SnapshotMonster {
@@ -49,6 +51,7 @@ struct SnapshotMonster {
 struct Snapshot {
     uint32_t tick = 0;
     bool baseline = false;
+    uint8_t status = 0;
     std::vector<SnapshotPlayer> players;
     std::vector<SnapshotObject> objects;
     std::vector<SnapshotMonster> monsters;
@@ -62,6 +65,7 @@ struct WelcomeObject {
     bool open = false;
     bool taken = false;
     int holder = -1;
+    int charge = 0;
 };
 
 struct WelcomeData {

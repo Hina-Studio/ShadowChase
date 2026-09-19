@@ -15,6 +15,9 @@ enum class ObjType : uint8_t {
     Door = 1,
     Crate = 2,
     Pickup = 3,
+    FuelCan = 4,
+    Generator = 5,
+    Vehicle = 6,
 };
 
 struct SimObject {
@@ -24,6 +27,8 @@ struct SimObject {
     bool open = false;
     bool taken = false;
     int holder = -1;
+    int charge = 0;
+    float progress = 0.0f;
 };
 
 struct PlayerState {
@@ -39,6 +44,8 @@ struct PlayerState {
     bool sprinting = false;
     bool interact = false;
     bool alive = true;
+    bool extracted = false;
+    double extractTimer = 0.0;
 };
 
 struct MonsterState {
@@ -59,6 +66,12 @@ constexpr double kMonsterSight = 18.0;
 constexpr double kMonsterCloseRange = 3.0;
 constexpr double kMonsterLoseTime = 3.0;
 constexpr double kPlayerMovingThreshold = 0.6;
+constexpr int kGeneratorFuelNeed = 1;
+constexpr int kVehicleFuelNeed = 2;
+constexpr int kFuelCanTotal = 6;
+constexpr double kChannelTime = 2.0;
+constexpr double kExtractTime = 1.5;
+constexpr double kExtractRange = 3.0;
 
 struct InputCmd {
     double moveX = 0.0;
@@ -92,6 +105,11 @@ public:
     unsigned int seed() const { return seed_; }
     unsigned int tick() const { return tick_; }
     int rejects() const { return rejects_; }
+    int status() const { return status_; }
+    const std::string& layoutReason() const { return layoutReason_; }
+    bool generatorsPowered() const;
+    int fuelCansInWorld() const;
+    void debugTeleportPlayer(int id, double x, double z);
 
     bool blocked(int x, int z) const;
     bool blockedAt(const Vec2& p) const;
@@ -105,6 +123,12 @@ private:
     void handleInteract(PlayerState& p);
     void refreshDynamicBlocks();
     void updateMonsters(double dt);
+    void updateObjectives(double dt);
+    void placeQuestObjects();
+    bool validateLayout(std::string& reason) const;
+    bool reachableFrom(const Vec2& start, const Vec2& goal,
+                       const std::vector<unsigned char>& grid) const;
+    void applyFallback();
     bool hasLineOfSight(const Vec2& a, const Vec2& b) const;
     Vec2 randomFreeSpot();
     bool blockedOnAxis(double x, double z) const;
@@ -123,5 +147,8 @@ private:
     std::vector<SimObject> objects_;
     std::vector<MonsterState> monsters_;
     std::mt19937 rng_;
+    int status_ = 0;
+    int vehicleId_ = -1;
+    std::string layoutReason_ = "ok";
 };
 }

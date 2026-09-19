@@ -23,6 +23,8 @@ void drawPanel(const ClientDebugState& state, bool& open) {
         ImGui::Text("monsters %d   state %s   pos %.1f, %.1f", state.monsterCount,
                     state.monsterState == 1 ? "CHASE" : (state.monsterState == 0 ? "patrol" : "-"),
                     state.monsterX, state.monsterZ);
+        ImGui::Text("QUEST  fuel cans %d   gens powered %d/2   vehicle %d/2   status %d",
+                    state.fuelCans, state.gensPowered, state.vehicleCharge, state.matchStatus);
         ImGui::Text("own pos %.2f, %.2f", state.ownX, state.ownZ);
         ImGui::Separator();
         ImGui::Text("Movement is server-authoritative (M1: speed validated server side).");
