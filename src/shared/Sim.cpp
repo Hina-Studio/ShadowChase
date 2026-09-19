@@ -79,6 +79,65 @@ void Sim::generate(unsigned int seed, int size) {
             }
         }
     }
+
+    dynamicGrid_ = grid_;
+    objects_.clear();
+    auto freeSpot = [&](int& ox, int& oz) {
+        std::uniform_int_distribution<int> d(3, size_ - 4);
+        for (int tries = 0; tries < 64; ++tries) {
+            int x = d(rng);
+            int z = d(rng);
+            if (grid_[static_cast<size_t>(z) * static_cast<size_t>(size_) + static_cast<size_t>(x)] == 0) {
+                ox = x;
+                oz = z;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    int nextId = 1;
+    for (int i = 0; i < 4; ++i) {
+        int x = 0;
+        int z = 0;
+        if (!freeSpot(x, z)) break;
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Door;
+        o.pos = Vec2{x + 0.5, z + 0.5};
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < 6; ++i) {
+        int x = 0;
+        int z = 0;
+        if (!freeSpot(x, z)) break;
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Crate;
+        o.pos = Vec2{x + 0.5, z + 0.5};
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < 6; ++i) {
+        int x = 0;
+        int z = 0;
+        if (!freeSpot(x, z)) break;
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Pickup;
+        o.pos = Vec2{x + 0.5, z + 0.5};
+        objects_.push_back(o);
+    }
+}
+
+void Sim::refreshDynamicBlocks() {
+    dynamicGrid_ = grid_;
+    for (const auto& o : objects_) {
+        if (o.type != ObjType::Door || o.open) continue;
+        int gx = static_cast<int>(std::floor(o.pos.x));
+        int gz = static_cast<int>(std::floor(o.pos.z));
+        if (gx < 0 || gz < 0 || gx >= size_ || gz >= size_) continue;
+        dynamicGrid_[static_cast<size_t>(gz) * static_cast<size_t>(size_) + static_cast<size_t>(gx)] = 1;
+    }
 }
 
 bool Sim::blockedCell(const std::vector<unsigned char>& grid, int size, double x, double z) {
@@ -112,9 +171,12 @@ bool Sim::blockedAt(const Vec2& p) const {
 }
 
 bool Sim::blockedOnAxis(double x, double z) const {
+    const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
     double r = kPlayerRadius;
-    return blockedAt(Vec2{x - r, z - r}) || blockedAt(Vec2{x + r, z - r}) ||
-           blockedAt(Vec2{x - r, z + r}) || blockedAt(Vec2{x + r, z + r});
+    auto hit = [&](double px, double pz) {
+        return blockedCell(g, size_, px, pz);
+    };
+    return hit(x - r, z - r) || hit(x + r, z - r) || hit(x - r, z + r) || hit(x + r, z + r);
 }
 
 int Sim::addPlayer(const std::string& name) {
@@ -128,6 +190,7 @@ int Sim::addPlayer(const std::string& name) {
     }
     players_.push_back(p);
     inputs_.push_back(InputCmd{});
+    prevInteract_.push_back(0);
     return p.id;
 }
 
@@ -142,25 +205,92 @@ void Sim::setInput(int id, const InputCmd& cmd) {
 }
 
 void Sim::movePlayer(PlayerState& p, const InputCmd& cmd, double dt) {
+    Vec2 forward{std::sin(cmd.yaw), std::cos(cmd.yaw)};
+    p.yaw = cmd.yaw;
+    p.sprinting = cmd.sprint && p.carrying < 0;
+
     Vec2 dir{cmd.moveX, cmd.moveZ};
-    if (dir.length() < 1e-6) {
-        p.sprinting = false;
+    if (dir.length() > 1e-6) {
+        dir = dir.normalized();
+        double speed = p.sprinting ? kSprintSpeed : kWalkSpeed;
+        if (p.carrying >= 0) speed *= 0.8;
+        Vec2 before = p.pos;
+        moveOnGrid(p.pos, dir, speed, dt, dynamicGrid_.empty() ? grid_ : dynamicGrid_, size_);
+        double maxDist = speed * dt * 1.25 + 0.06;
+        if (p.pos.distance(before) > maxDist) {
+            p.pos = before;
+            ++rejects_;
+        }
+    }
+
+    if (p.carrying >= 0) {
+        for (auto& o : objects_) {
+            if (o.id == p.carrying) {
+                o.pos = p.pos + forward * 0.9;
+                o.holder = p.id;
+            }
+        }
+    }
+}
+
+void Sim::handleInteract(PlayerState& p) {
+    SimObject* best = nullptr;
+    double bestD = 1.9;
+    for (auto& o : objects_) {
+        if (o.id == p.carrying) continue;
+        if (o.type == ObjType::Pickup && o.taken) continue;
+        if (o.type == ObjType::Crate && o.holder >= 0 && o.holder != p.id) continue;
+        if (o.type == ObjType::Crate && p.carrying >= 0) continue;
+        double d = p.pos.distance(o.pos);
+        if (d < bestD) {
+            bestD = d;
+            best = &o;
+        }
+    }
+
+    if (!best) {
+        if (p.carrying >= 0) {
+            for (auto& o : objects_) {
+                if (o.id == p.carrying) o.holder = -1;
+            }
+            p.carrying = -1;
+        }
         return;
     }
-    dir = dir.normalized();
-    double speed = cmd.sprint ? kSprintSpeed : kWalkSpeed;
-    p.sprinting = cmd.sprint;
-    p.yaw = cmd.yaw;
-    moveOnGrid(p.pos, dir, speed, dt, grid_, size_);
+
+    if (best->type == ObjType::Door) {
+        best->open = !best->open;
+    } else if (best->type == ObjType::Pickup) {
+        best->taken = true;
+        p.hp = std::min(100.0, p.hp + 40.0);
+        p.ammo += 12;
+    } else if (best->type == ObjType::Crate) {
+        if (p.carrying < 0) {
+            best->holder = p.id;
+            p.carrying = best->id;
+        } else {
+            for (auto& o : objects_) {
+                if (o.id == p.carrying) o.holder = -1;
+            }
+            p.carrying = -1;
+        }
+    }
 }
 
 void Sim::step(double dt) {
     if (dt <= 0.0) return;
     ++tick_;
+    refreshDynamicBlocks();
     for (auto& p : players_) {
         if (!p.alive) continue;
-        const InputCmd& cmd = inputs_[static_cast<size_t>(p.id)];
+        InputCmd& cmd = inputs_[static_cast<size_t>(p.id)];
         p.interact = cmd.interact;
+
+        bool edge = cmd.interact && prevInteract_[static_cast<size_t>(p.id)] == 0;
+        prevInteract_[static_cast<size_t>(p.id)] = cmd.interact ? 1 : 0;
+        if (edge) {
+            handleInteract(p);
+        }
         movePlayer(p, cmd, dt);
     }
 }

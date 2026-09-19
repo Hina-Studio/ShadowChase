@@ -18,11 +18,12 @@ void drawPanel(const ClientDebugState& state, bool& open) {
         ImGui::Text("player id %d   remotes %d", state.playerId, state.remoteCount);
         ImGui::Separator();
         ImGui::Text("Map seed %u  size %d  blocks %d", state.seed, state.mapSize, state.blockCount);
+        ImGui::Text("objects %d   hp %.0f   carrying %d   gamepad %s", state.objectCount, state.hp,
+                    state.carrying, state.padActive ? "on" : "off");
         ImGui::Text("own pos %.2f, %.2f", state.ownX, state.ownZ);
         ImGui::Separator();
-        ImGui::Text("Movement (server authoritative; sliders are local preview)");
-        ImGui::SliderFloat("walk", const_cast<float*>(&state.walkSpeed), 1.0f, 10.0f);
-        ImGui::SliderFloat("sprint", const_cast<float*>(&state.sprintSpeed), 2.0f, 14.0f);
+        ImGui::Text("Movement is server-authoritative (M1: speed validated server side).");
+        ImGui::Text("Pickups: +40 hp / +12 ammo   Crates: carry slows 20%%   Doors: E toggles");
     }
     ImGui::End();
 #else

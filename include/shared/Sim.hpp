@@ -10,12 +10,29 @@ struct Block {
     int z = 0;
 };
 
+enum class ObjType : uint8_t {
+    Door = 1,
+    Crate = 2,
+    Pickup = 3,
+};
+
+struct SimObject {
+    int id = 0;
+    ObjType type = ObjType::Door;
+    Vec2 pos;
+    bool open = false;
+    bool taken = false;
+    int holder = -1;
+};
+
 struct PlayerState {
     int id = -1;
     std::string name;
     Vec2 pos;
     double yaw = 0.0;
     double hp = 100.0;
+    int ammo = 0;
+    int carrying = -1;
     bool sprinting = false;
     bool interact = false;
     bool alive = true;
@@ -46,10 +63,12 @@ public:
 
     const std::vector<PlayerState>& players() const { return players_; }
     const std::vector<Block>& blocks() const { return blocks_; }
+    const std::vector<SimObject>& objects() const { return objects_; }
     const std::vector<Vec2>& spawns() const { return spawns_; }
     int size() const { return size_; }
     unsigned int seed() const { return seed_; }
     unsigned int tick() const { return tick_; }
+    int rejects() const { return rejects_; }
 
     bool blocked(int x, int z) const;
     bool blockedAt(const Vec2& p) const;
@@ -60,15 +79,21 @@ public:
 
 private:
     void movePlayer(PlayerState& p, const InputCmd& cmd, double dt);
+    void handleInteract(PlayerState& p);
+    void refreshDynamicBlocks();
     bool blockedOnAxis(double x, double z) const;
 
     int size_ = 48;
     unsigned int seed_ = 0;
     unsigned int tick_ = 0;
+    int rejects_ = 0;
     std::vector<Block> blocks_;
     std::vector<Vec2> spawns_;
     std::vector<PlayerState> players_;
     std::vector<InputCmd> inputs_;
+    std::vector<unsigned char> prevInteract_;
     std::vector<unsigned char> grid_;
+    std::vector<unsigned char> dynamicGrid_;
+    std::vector<SimObject> objects_;
 };
 }

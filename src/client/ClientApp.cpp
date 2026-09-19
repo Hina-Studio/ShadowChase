@@ -16,11 +16,6 @@
 #include "core/Logger.hpp"
 
 namespace {
-double nowSeconds() {
-    using namespace std::chrono;
-    return duration<double>(steady_clock::now().time_since_epoch()).count();
-}
-
 Color colorForId(int id) {
     static const Color palette[] = {
         Color{90, 220, 130, 255}, Color{255, 190, 70, 255}, Color{90, 170, 255, 255},
@@ -34,6 +29,8 @@ bool ClientApp::init(int argc, char** argv) {
     core::Config::instance().load("config.ini");
     serverAddr_ = core::Config::instance().get("client.server", "127.0.0.1:7777");
     playerName_ = core::Config::instance().get("client.name", "Player");
+    roomCode_ = static_cast<uint32_t>(
+        std::stoul(core::Config::instance().get("client.room", "0")));
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -41,6 +38,8 @@ bool ClientApp::init(int argc, char** argv) {
             serverAddr_ = argv[++i];
         } else if (arg == "--name" && i + 1 < argc) {
             playerName_ = argv[++i];
+        } else if (arg == "--room" && i + 1 < argc) {
+            roomCode_ = static_cast<uint32_t>(std::stoul(argv[++i]));
         }
     }
     auto colon = serverAddr_.rfind(':');
@@ -80,8 +79,23 @@ bool ClientApp::init(int argc, char** argv) {
         core::Logger::error("[CLIENT] connect failed");
         return false;
     }
-    core::Logger::info("[CLIENT] connecting to " + serverAddr_ + ":" + std::to_string(serverPort_));
+    core::Logger::info("[CLIENT] connecting to " + serverAddr_ + ":" + std::to_string(serverPort_) +
+                       " room=" + std::to_string(roomCode_));
     return true;
+}
+
+void ClientApp::rebuildDynamicGrid() {
+    if (grid_.empty()) return;
+    dynGrid_ = grid_;
+    for (const auto& kv : netObjects_) {
+        const sc::SnapshotObject& o = kv.second;
+        if (o.type != static_cast<uint8_t>(sc::ObjType::Door)) continue;
+        if ((o.flags & 0x01) != 0) continue;
+        int gx = static_cast<int>(std::floor(o.x));
+        int gz = static_cast<int>(std::floor(o.z));
+        if (gx < 0 || gz < 0 || gx >= mapSize_ || gz >= mapSize_) continue;
+        dynGrid_[static_cast<size_t>(gz) * static_cast<size_t>(mapSize_) + static_cast<size_t>(gx)] = 1;
+    }
 }
 
 void ClientApp::handleEvents() {
@@ -89,30 +103,28 @@ void ClientApp::handleEvents() {
     ENetEvent event;
     while (enet_host_service(host_, &event, 0) > 0) {
         if (event.type == ENET_EVENT_TYPE_CONNECT) {
-            auto join = sc::encodeJoin(playerName_);
+            auto join = sc::encodeJoin(roomCode_, playerName_, SLASHCO_VERSION);
             ENetPacket* packet = enet_packet_create(join.data(), join.size(),
                                                     ENET_PACKET_FLAG_RELIABLE);
             enet_peer_send(peer_, 0, packet);
             connected_ = true;
-            core::Logger::info("[CLIENT] connected, joined as " + playerName_);
+            core::Logger::info("[CLIENT] connected, joining room " + std::to_string(roomCode_));
         } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
             connected_ = false;
-            core::Logger::warn("[CLIENT] disconnected");
+            if (!rejected_) {
+                core::Logger::warn("[CLIENT] disconnected");
+            }
         } else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
             dbg_.recvPackets += 1;
             dbg_.recvBytes += static_cast<long long>(event.packet->dataLength);
             uint8_t type = event.packet->dataLength > 0 ? event.packet->data[0] : 0;
             if (type == static_cast<uint8_t>(sc::MsgType::Welcome)) {
-                std::vector<sc::Block> blocks;
-                unsigned int seed = 0;
-                int mapSize = 0;
-                int pid = -1;
-                if (sc::decodeWelcome(event.packet->data, event.packet->dataLength, pid, seed,
-                                      mapSize, blocks)) {
-                    blocks_ = blocks;
-                    seed_ = seed;
-                    mapSize_ = mapSize;
-                    playerId_ = pid;
+                sc::WelcomeData welcome;
+                if (sc::decodeWelcome(event.packet->data, event.packet->dataLength, welcome)) {
+                    blocks_ = welcome.blocks;
+                    seed_ = welcome.seed;
+                    mapSize_ = welcome.mapSize;
+                    playerId_ = welcome.playerId;
                     grid_.assign(static_cast<size_t>(mapSize_) * static_cast<size_t>(mapSize_), 0);
                     for (const auto& b : blocks_) {
                         if (b.x >= 0 && b.z >= 0 && b.x < mapSize_ && b.z < mapSize_) {
@@ -120,28 +132,59 @@ void ClientApp::handleEvents() {
                                   static_cast<size_t>(b.x)] = 1;
                         }
                     }
+                    netObjects_.clear();
+                    for (const auto& o : welcome.objects) {
+                        sc::SnapshotObject so;
+                        so.id = o.id;
+                        so.type = o.type;
+                        so.x = o.x;
+                        so.z = o.z;
+                        so.holder = o.holder;
+                        so.flags = 0;
+                        if (o.open) so.flags |= 0x01;
+                        if (o.taken) so.flags |= 0x02;
+                        netObjects_[o.id] = so;
+                    }
+                    rebuildDynamicGrid();
                     predicted_ = sc::Vec2{mapSize_ / 2.0, mapSize_ / 2.0};
-                    core::Logger::info("[CLIENT] welcome id=" + std::to_string(pid) + " seed=" +
-                                       std::to_string(seed) + " map=" + std::to_string(mapSize) +
-                                       " blocks=" + std::to_string(blocks_.size()));
+                    core::Logger::info("[CLIENT] welcome id=" + std::to_string(playerId_) +
+                                       " room=" + std::to_string(welcome.roomCode) + " seed=" +
+                                       std::to_string(seed_) + " blocks=" +
+                                       std::to_string(blocks_.size()) + " objects=" +
+                                       std::to_string(netObjects_.size()));
+                }
+            } else if (type == static_cast<uint8_t>(sc::MsgType::Reject)) {
+                uint8_t reason = 0;
+                std::string text;
+                if (sc::decodeReject(event.packet->data, event.packet->dataLength, reason, text)) {
+                    rejected_ = true;
+                    core::Logger::error("[CLIENT] rejected: " + text);
+                    quit_ = true;
                 }
             } else if (type == static_cast<uint8_t>(sc::MsgType::Snapshot)) {
                 sc::Snapshot snap;
                 if (sc::decodeSnapshot(event.packet->data, event.packet->dataLength, snap)) {
-                    snapPrev_ = snapCurr_;
-                    snapPrevTime_ = snapCurrTime_;
-                    snapCurr_ = snap;
-                    snapCurrTime_ = nowSeconds();
-                    dbg_.serverTick = snap.tick;
+                    serverTick_ = snap.tick;
+                    if (snap.baseline) {
+                        netPlayers_.clear();
+                        netObjects_.clear();
+                    }
                     for (const auto& p : snap.players) {
-                        if (p.id == playerId_) {
-                            sc::Vec2 server{p.x, p.z};
-                            double err = predicted_.distance(server);
-                            if (err > 1.5) {
-                                predicted_ = server;
-                            } else if (err > 0.02) {
-                                predicted_ = predicted_ + (server - predicted_) * 0.2;
-                            }
+                        netPlayers_[p.id] = p;
+                    }
+                    for (const auto& o : snap.objects) {
+                        netObjects_[o.id] = o;
+                    }
+                    rebuildDynamicGrid();
+
+                    auto it = netPlayers_.find(playerId_);
+                    if (it != netPlayers_.end()) {
+                        sc::Vec2 server{it->second.x, it->second.z};
+                        double err = predicted_.distance(server);
+                        if (err > 1.5) {
+                            predicted_ = server;
+                        } else if (err > 0.02) {
+                            predicted_ = predicted_ + (server - predicted_) * 0.2;
                         }
                     }
                 }
@@ -159,16 +202,30 @@ void ClientApp::sendInput(double dt) {
 
     double fwd = (IsKeyDown(KEY_W) ? 1.0 : 0.0) - (IsKeyDown(KEY_S) ? 1.0 : 0.0);
     double side = (IsKeyDown(KEY_D) ? 1.0 : 0.0) - (IsKeyDown(KEY_A) ? 1.0 : 0.0);
-    if (fwd != 0.0) side = side;
-    double yaw = yaw_;
-    double fx = std::sin(yaw);
-    double fz = std::cos(yaw);
+    bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
+    bool interact = IsKeyPressed(KEY_E);
+
+    if (IsGamepadAvailable(0)) {
+        fwd += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_Y) * -1.0;
+        side += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
+        sprint = sprint || IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_2);
+        interact = interact || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+        dbg_.padActive = true;
+    } else {
+        dbg_.padActive = false;
+    }
+
+    fwd = std::max(-1.0, std::min(1.0, fwd));
+    side = std::max(-1.0, std::min(1.0, side));
+
+    double fx = std::sin(yaw_);
+    double fz = std::cos(yaw_);
     sc::InputCmd cmd;
     cmd.moveX = fx * fwd + (-fz) * side;
-    cmd.moveZ = fz * fwd + (fx)*side;
-    cmd.yaw = yaw;
-    cmd.sprint = IsKeyDown(KEY_LEFT_SHIFT);
-    cmd.interact = IsKeyDown(KEY_E);
+    cmd.moveZ = fz * fwd + fx * side;
+    cmd.yaw = yaw_;
+    cmd.sprint = sprint;
+    cmd.interact = interact;
     cmd.seq = ++seq_;
 
     auto payload = sc::encodeInput(cmd);
@@ -181,25 +238,78 @@ void ClientApp::updateLocal(double dt) {
     Vector2 md = GetMouseDelta();
     yaw_ -= md.x * 0.003;
     pitch_ -= md.y * 0.003;
+
+    if (IsGamepadAvailable(0)) {
+        yaw_ -= GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_X) * 2.4 * dt;
+        pitch_ -= GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_Y) * 1.8 * dt;
+    }
     if (pitch_ > 1.45) pitch_ = 1.45;
     if (pitch_ < -1.45) pitch_ = -1.45;
 
-    if (grid_.empty()) return;
+    const std::vector<unsigned char>& useGrid = dynGrid_.empty() ? grid_ : dynGrid_;
+    if (useGrid.empty()) return;
+
     double fwd = (IsKeyDown(KEY_W) ? 1.0 : 0.0) - (IsKeyDown(KEY_S) ? 1.0 : 0.0);
     double side = (IsKeyDown(KEY_D) ? 1.0 : 0.0) - (IsKeyDown(KEY_A) ? 1.0 : 0.0);
+    bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
+    if (IsGamepadAvailable(0)) {
+        fwd += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_Y) * -1.0;
+        side += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
+        sprint = sprint || IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_2);
+    }
+    fwd = std::max(-1.0, std::min(1.0, fwd));
+    side = std::max(-1.0, std::min(1.0, side));
+
     double fx = std::sin(yaw_);
     double fz = std::cos(yaw_);
     sc::Vec2 dir{fx * fwd + (-fz) * side, fz * fwd + fx * side};
     if (dir.length() < 1e-6) return;
 
+    bool carrying = false;
+    for (const auto& kv : netObjects_) {
+        if (kv.second.type == static_cast<uint8_t>(sc::ObjType::Crate) &&
+            kv.second.holder == playerId_) {
+            carrying = true;
+            break;
+        }
+    }
+
     sc::InputCmd cmd;
     cmd.moveX = dir.x;
     cmd.moveZ = dir.z;
-    cmd.sprint = IsKeyDown(KEY_LEFT_SHIFT);
+    cmd.sprint = sprint;
     sc::InputCmd clean = sc::sanitizeInput(cmd);
     double speed = clean.sprint ? sc::kSprintSpeed : sc::kWalkSpeed;
+    if (carrying) speed *= 0.8;
     sc::Sim::moveOnGrid(predicted_, sc::Vec2{clean.moveX, clean.moveZ}.normalized(), speed, dt,
-                        grid_, mapSize_);
+                        useGrid, mapSize_);
+}
+
+std::string ClientApp::interactionPrompt() const {
+    double fx = std::sin(yaw_);
+    double fz = std::cos(yaw_);
+    const sc::SnapshotObject* best = nullptr;
+    double bestD = 1.9;
+    for (const auto& kv : netObjects_) {
+        const sc::SnapshotObject& o = kv.second;
+        double dx = o.x - predicted_.x;
+        double dz = o.z - predicted_.z;
+        double d = std::sqrt(dx * dx + dz * dz);
+        if (d > bestD) continue;
+        if (dx * fx + dz * fz < 0.0) continue;
+        if (o.type == static_cast<uint8_t>(sc::ObjType::Pickup) && (o.flags & 0x02)) continue;
+        best = &o;
+        bestD = d;
+    }
+    if (!best) return "";
+    if (best->type == static_cast<uint8_t>(sc::ObjType::Door)) {
+        return (best->flags & 0x01) ? "[E] close door" : "[E] open door";
+    }
+    if (best->type == static_cast<uint8_t>(sc::ObjType::Crate)) {
+        if (best->holder == playerId_) return "[E] drop crate";
+        return "[E] carry crate (slower)";
+    }
+    return "[E] pick up supplies (+40 hp, +12 ammo)";
 }
 
 void ClientApp::render() {
@@ -230,30 +340,30 @@ void ClientApp::render() {
         DrawCubeWires(c, 1.0f, 3.0f, 1.0f, Color{80, 60, 40, 255});
     }
 
-    double now = nowSeconds();
-    double span = snapCurrTime_ - snapPrevTime_;
-    double alpha = 0.0;
-    if (span > 1e-4) {
-        alpha = (now - 0.1 - snapPrevTime_) / span;
-        alpha = std::max(0.0, std::min(1.0, alpha));
+    for (const auto& kv : netObjects_) {
+        const sc::SnapshotObject& o = kv.second;
+        uint8_t type = o.type;
+        if (type == static_cast<uint8_t>(sc::ObjType::Door)) {
+            bool open = (o.flags & 0x01) != 0;
+            Color c = open ? Color{90, 220, 130, 220} : Color{170, 120, 60, 255};
+            DrawCube(Vector3{o.x, 1.5f, o.z}, 0.9f, 3.0f, 0.25f, c);
+            DrawCubeWires(Vector3{o.x, 1.5f, o.z}, 0.9f, 3.0f, 0.25f, Color{40, 30, 20, 255});
+        } else if (type == static_cast<uint8_t>(sc::ObjType::Crate)) {
+            Color c = o.holder >= 0 ? Color{255, 210, 90, 255} : Color{190, 150, 90, 255};
+            DrawCube(Vector3{o.x, 0.5f, o.z}, 0.8f, 1.0f, 0.8f, c);
+            DrawCubeWires(Vector3{o.x, 0.5f, o.z}, 0.8f, 1.0f, 0.8f, Color{60, 40, 20, 255});
+        } else if (type == static_cast<uint8_t>(sc::ObjType::Pickup)) {
+            if ((o.flags & 0x02) != 0) continue;
+            DrawSphere(Vector3{o.x, 0.45f, o.z}, 0.35f, Color{90, 230, 160, 255});
+            DrawSphereWires(Vector3{o.x, 0.45f, o.z}, 0.35f, 8, 8, Color{30, 90, 60, 255});
+        }
     }
-    auto findPrev = [&](int id) -> const sc::SnapshotPlayer* {
-        for (const auto& p : snapPrev_.players) {
-            if (p.id == id) return &p;
-        }
-        return nullptr;
-    };
-    for (const auto& p : snapCurr_.players) {
+
+    for (const auto& kv : netPlayers_) {
+        const sc::SnapshotPlayer& p = kv.second;
         if (p.id == playerId_) continue;
-        const sc::SnapshotPlayer* q = findPrev(p.id);
-        float x = p.x;
-        float z = p.z;
-        if (q) {
-            x = static_cast<float>(q->x + (p.x - q->x) * alpha);
-            z = static_cast<float>(q->z + (p.z - q->z) * alpha);
-        }
-        Vector3 a{x, 0.45f, z};
-        Vector3 b{x, 1.25f, z};
+        Vector3 a{p.x, 0.45f, p.z};
+        Vector3 b{p.x, 1.25f, p.z};
         DrawCapsule(a, b, 0.35f, 8, 8, colorForId(p.id));
     }
     EndMode3D();
@@ -267,17 +377,38 @@ void ClientApp::render() {
     dbg_.frameMs = static_cast<float>(GetFrameTime() * 1000.0);
     dbg_.rttMs = peer_ ? peer_->roundTripTime : -1;
     dbg_.playerId = playerId_;
-    dbg_.remoteCount = static_cast<int>(snapCurr_.players.size()) - (playerId_ >= 0 ? 1 : 0);
+    dbg_.remoteCount = static_cast<int>(netPlayers_.size()) - (playerId_ >= 0 ? 1 : 0);
     dbg_.seed = seed_;
     dbg_.mapSize = mapSize_;
     dbg_.blockCount = static_cast<int>(blocks_.size());
+    dbg_.objectCount = static_cast<int>(netObjects_.size());
     dbg_.ownX = predicted_.x;
     dbg_.ownZ = predicted_.z;
     dbg_.connected = connected_;
+    auto ownIt = netPlayers_.find(playerId_);
+    if (ownIt != netPlayers_.end()) {
+        dbg_.hp = ownIt->second.hp;
+    }
+    dbg_.carrying = -1;
+    for (const auto& kv : netObjects_) {
+        if (kv.second.type == static_cast<uint8_t>(sc::ObjType::Crate) &&
+            kv.second.holder == playerId_) {
+            dbg_.carrying = kv.second.id;
+        }
+    }
 
-    DrawText(TextFormat("SlashCo M0  %s  tick %u  players %d", connected_ ? "online" : "offline",
-                        dbg_.serverTick, static_cast<int>(snapCurr_.players.size())),
+    DrawText(TextFormat("SlashCo M1  room %u  %s  tick %u  players %d", roomCode_,
+                        connected_ ? "online" : "offline", serverTick_,
+                        static_cast<int>(netPlayers_.size())),
              12, 10, 18, Color{220, 220, 230, 255});
+
+    std::string prompt = interactionPrompt();
+    if (!prompt.empty()) {
+        int w = MeasureText(prompt.c_str(), 20);
+        DrawText(prompt.c_str(), GetScreenWidth() / 2 - w / 2, GetScreenHeight() / 2 + 40, 20,
+                 Color{255, 230, 140, 255});
+    }
+
     DrawText("WASD move  SHIFT sprint  E interact  F1 panel  ESC quit", 12,
              GetScreenHeight() - 26, 16, Color{180, 180, 190, 255});
 

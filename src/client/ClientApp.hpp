@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -35,11 +36,13 @@ struct ClientDebugState {
     unsigned int seed = 0;
     int mapSize = 0;
     int blockCount = 0;
+    int objectCount = 0;
     double ownX = 0.0;
     double ownZ = 0.0;
+    float hp = 100.0f;
+    int carrying = -1;
     bool connected = false;
-    float walkSpeed = static_cast<float>(sc::kWalkSpeed);
-    float sprintSpeed = static_cast<float>(sc::kSprintSpeed);
+    bool padActive = false;
 };
 
 class ClientApp {
@@ -53,16 +56,21 @@ private:
     void sendInput(double dt);
     void updateLocal(double dt);
     void render();
+    void rebuildDynamicGrid();
+    std::string interactionPrompt() const;
 
     ENetHost* host_ = nullptr;
     ENetPeer* peer_ = nullptr;
     bool connected_ = false;
+    bool rejected_ = false;
     std::string serverAddr_ = "127.0.0.1";
     int serverPort_ = 7777;
     std::string playerName_ = "Player";
+    uint32_t roomCode_ = 0;
 
     std::vector<sc::Block> blocks_;
     std::vector<unsigned char> grid_;
+    std::vector<unsigned char> dynGrid_;
     int mapSize_ = 0;
     unsigned int seed_ = 0;
     int playerId_ = -1;
@@ -70,10 +78,9 @@ private:
     double yaw_ = 0.0;
     double pitch_ = 0.0;
 
-    sc::Snapshot snapPrev_;
-    sc::Snapshot snapCurr_;
-    double snapPrevTime_ = 0.0;
-    double snapCurrTime_ = 0.0;
+    std::unordered_map<int, sc::SnapshotPlayer> netPlayers_;
+    std::unordered_map<int, sc::SnapshotObject> netObjects_;
+    uint32_t serverTick_ = 0;
 
     double inputTimer_ = 0.0;
     unsigned int seq_ = 0;
