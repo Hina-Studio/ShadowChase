@@ -37,6 +37,7 @@ private:
     double profInterval = 2.0;
     double profAccum = 0.0;
     bool trapTriggered = false;
+    bool mouseCapturedState = false;
 
     game::World world;
     game::StateMachine states;

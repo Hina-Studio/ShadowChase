@@ -142,6 +142,8 @@ void Game::init() {
     if (!gridOpt.empty()) rs.grid = std::stoi(gridOpt);
     std::string vhsOpt = core::Config::instance().get("render.vhs", "");
     if (!vhsOpt.empty()) rs.vhs = std::stoi(vhsOpt);
+    std::string mode3dOpt = core::Config::instance().get("render.mode3d", "1");
+    rs.mode3d = mode3dOpt == "1" ? 1 : 0;
     if (!benchMode) renderer.init(rs);
     if (!benchMode && core::Loc::instance().locale() == "zh" && !renderer.hasUnicodeFont()) {
         core::Logger::warn("CJK font unavailable, falling back to English UI");
@@ -742,11 +744,30 @@ void Game::run() {
         }
         const InputState& is = input.state();
         game::Control c;
-        c.move.x = (is.moveRight ? 1.0 : 0.0) - (is.moveLeft ? 1.0 : 0.0);
-        c.move.z = (is.moveDown ? 1.0 : 0.0) - (is.moveUp ? 1.0 : 0.0);
+        if (renderer.is3D() && (states.current() == "Playing" || states.current() == "Tutorial")) {
+            double fwd = (is.moveUp ? 1.0 : 0.0) - (is.moveDown ? 1.0 : 0.0);
+            double right = (is.moveRight ? 1.0 : 0.0) - (is.moveLeft ? 1.0 : 0.0);
+            double yaw = renderer.cameraYaw();
+            double fx = std::sin(yaw);
+            double fz = std::cos(yaw);
+            double rx = -fz;
+            double rz = fx;
+            c.move.x = fx * fwd + rx * right;
+            c.move.z = fz * fwd + rz * right;
+        } else {
+            c.move.x = (is.moveRight ? 1.0 : 0.0) - (is.moveLeft ? 1.0 : 0.0);
+            c.move.z = (is.moveDown ? 1.0 : 0.0) - (is.moveUp ? 1.0 : 0.0);
+        }
         c.interact = is.interact;
         c.sprint = is.sprint;
         localCtrl = c;
+
+        bool wantMouse = renderer.is3D() && !benchMode &&
+                         (states.current() == "Playing" || states.current() == "Tutorial");
+        if (wantMouse != mouseCapturedState) {
+            renderer.setMouseCapture(wantMouse);
+            mouseCapturedState = wantMouse;
+        }
 
         int slot = -1;
         if (is.slot1) slot = 0;

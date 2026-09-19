@@ -81,6 +81,7 @@ void Renderer::init(const RendererSettings& settings) {
     if (settings.maxFPS >= 0) p.fps = settings.maxFPS;
     if (settings.grid >= 0) p.grid = settings.grid;
     if (settings.vhs >= 0) p.vhs = settings.vhs;
+    if (settings.mode3d >= 0) mode3d = settings.mode3d != 0;
 
     segments = p.segments;
     maxFPS = p.fps;
@@ -259,6 +260,25 @@ void Renderer::addHitFx(double x, double z, const std::string& text, unsigned ch
 #endif
 }
 
+void Renderer::setMouseCapture(bool on) {
+#ifdef SLASHCO_RAYLIB
+    if (on == mouseCaptured) return;
+    mouseCaptured = on;
+    if (on) {
+        DisableCursor();
+    } else {
+        EnableCursor();
+    }
+#else
+    mouseCaptured = on;
+#endif
+}
+
+void Renderer::resetCamera() {
+    camYaw = 0.0f;
+    camPitch = 0.0f;
+}
+
 void Renderer::setTutorialMarker(bool active, double x, double z) {
     tutorActive = active;
     tutorX = x;
@@ -423,6 +443,14 @@ void drawVhsFx(RenderTexture2D& rt, int w, int h, float shakeX, float shakeY) {
 }
 
 void Renderer::drawSceneImpl(const game::World& world) {
+    if (mode3d) {
+        drawScene3DImpl(world);
+    } else {
+        drawScene2DImpl(world);
+    }
+}
+
+void Renderer::drawScene2DImpl(const game::World& world) {
     const double margin = 40.0;
     const double m = std::min(screenW - margin * 2.0, screenH - margin * 2.0 - 60.0);
     const double s = m / 22.0;
@@ -585,6 +613,122 @@ void Renderer::drawSceneImpl(const game::World& world) {
             DrawRing(ctr, static_cast<float>(s * 6.0), static_cast<float>(s * 60.0), 0.0f, 360.0f,
                      segments, Color{0, 0, 0, 205});
         }
+    }
+}
+
+void Renderer::drawScene3DImpl(const game::World& world) {
+    const game::Survivor* focus = world.localSurvivor();
+    if (!focus) {
+        for (const auto& s : world.survivors()) {
+            if (!s.eliminated && !s.escaped) {
+                focus = &s;
+                break;
+            }
+        }
+    }
+
+    Vector3 eye{0.0f, 7.0f, 7.0f};
+    Vector3 target{0.0f, 0.0f, 0.0f};
+    if (focus) {
+        eye = Vector3{static_cast<float>(focus->position.x), 1.65f,
+                      static_cast<float>(focus->position.z)};
+    }
+
+    if (mouseCaptured) {
+        Vector2 d = GetMouseDelta();
+        camYaw -= d.x * 0.003f;
+        camPitch -= d.y * 0.003f;
+        if (camPitch > 1.45f) camPitch = 1.45f;
+        if (camPitch < -1.45f) camPitch = -1.45f;
+    }
+
+    float cp = std::cos(camPitch);
+    Vector3 fwd{std::sin(camYaw) * cp, std::sin(camPitch), std::cos(camYaw) * cp};
+    if (focus) {
+        target = Vector3{eye.x + fwd.x, eye.y + fwd.y, eye.z + fwd.z};
+    }
+
+    Camera3D cam{};
+    cam.position = eye;
+    cam.target = target;
+    cam.up = Vector3{0.0f, 1.0f, 0.0f};
+    cam.fovy = 72.0f;
+    cam.projection = CAMERA_PERSPECTIVE;
+
+    BeginMode3D(cam);
+
+    DrawPlane(Vector3{0.0f, 0.0f, 0.0f}, Vector2{22.0f, 22.0f}, toColor(Rgb{30, 30, 38}));
+    DrawGrid(22, 1.0f);
+
+    for (int gx = 0; gx < game::NavGrid::Size; ++gx) {
+        for (int gz = 0; gz < game::NavGrid::Size; ++gz) {
+            if (!world.nav().blocked(gx, gz)) continue;
+            Vector3 c{static_cast<float>(gx - 11), 1.5f, static_cast<float>(gz - 11)};
+            DrawCube(c, 0.98f, 3.0f, 0.98f, toColor(kWallCol));
+            DrawCubeWires(c, 0.98f, 3.0f, 0.98f, toColor(Rgb{90, 62, 36}));
+        }
+    }
+
+    for (const auto& e : world.exits()) {
+        Vector3 c{static_cast<float>(e.position.x), 1.5f, static_cast<float>(e.position.z)};
+        DrawCube(c, 2.0f, 3.0f, 0.5f, e.open ? toColor(kExitCol) : toColor(Rgb{90, 90, 100}));
+    }
+
+    for (const auto& g : world.generators()) {
+        Vector3 c{static_cast<float>(g.position.x), 0.6f, static_cast<float>(g.position.z)};
+        Color gc = g.activated ? toColor(Rgb{80, 230, 120}) : toColor(kGenCol);
+        DrawCube(c, 1.0f, 1.2f, 1.0f, gc);
+        DrawCubeWires(c, 1.0f, 1.2f, 1.0f, toColor(kBg));
+    }
+
+    {
+        Vector3 c{static_cast<float>(world.vaultPos().x), 0.7f,
+                  static_cast<float>(world.vaultPos().z)};
+        int variant = world.vaultVariant();
+        Rgb base = variant == 1 ? Rgb{90, 220, 140}
+                                : (variant == 2 ? Rgb{230, 90, 90} : Rgb{190, 120, 255});
+        DrawCube(c, 1.4f, 1.4f, 1.4f, world.vaultOpened() ? toColor(base, 90) : toColor(base));
+    }
+
+    if (world.modeName() == "Blackout") {
+        Vector3 c{static_cast<float>(world.powerSwitchPos().x), 0.8f,
+                  static_cast<float>(world.powerSwitchPos().z)};
+        DrawCube(c, 0.8f, 1.6f, 0.8f,
+                 world.powerSwitchActivated() ? toColor(Rgb{80, 230, 120}) : toColor(Rgb{90, 200, 255}));
+    }
+
+    for (const auto& s : world.survivors()) {
+        if (s.eliminated || s.escaped) continue;
+        Vector3 a{static_cast<float>(s.position.x), 0.45f, static_cast<float>(s.position.z)};
+        Vector3 b{static_cast<float>(s.position.x), 1.25f, static_cast<float>(s.position.z)};
+        Color sc = s.downed ? toColor(Rgb{160, 160, 170}) : toColor(kSurvivorCol);
+        DrawCapsule(a, b, s.downed ? 0.45f : 0.35f, 8, 8, sc);
+    }
+
+    for (const auto& k : world.killers()) {
+        Rgb base = kKillerCol;
+        if (k.kind() == game::KillerAI::Kind::Whisper) {
+            base = Rgb{90, 160, 255};
+        } else if (k.kind() == game::KillerAI::Kind::Warden) {
+            base = Rgb{80, 220, 200};
+        } else if (k.kind() == game::KillerAI::Kind::Butcher) {
+            base = Rgb{200, 80, 220};
+        } else if (k.isTemporaryKiller()) {
+            base = Rgb{255, 120, 60};
+        }
+        float r = (k.kind() == game::KillerAI::Kind::Butcher) ? 0.6f : 0.45f;
+        Vector3 a{static_cast<float>(k.position().x), 0.5f, static_cast<float>(k.position().z)};
+        Vector3 b{static_cast<float>(k.position().x), 1.6f, static_cast<float>(k.position().z)};
+        DrawCapsule(a, b, r, 8, 8, toColor(base));
+    }
+
+    EndMode3D();
+
+    if (world.modeName() == "Blackout" && !world.over() && world.localSurvivor()) {
+        Vector2 center{static_cast<float>(screenW) / 2.0f, static_cast<float>(screenH) / 2.0f};
+        float radius = static_cast<float>(screenH) * 0.42f;
+        DrawRectangle(0, 0, screenW, screenH, Color{0, 0, 0, 60});
+        DrawRing(center, radius, radius + 2200.0f, 0.0f, 360.0f, segments, Color{0, 0, 0, 205});
     }
 }
 

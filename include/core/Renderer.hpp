@@ -15,6 +15,7 @@ struct RendererSettings {
     int maxFPS = -1;
     int grid = -1;
     int vhs = -1;
+    int mode3d = -1;
 };
 
 struct UiFrame {
@@ -55,6 +56,11 @@ public:
     void text(const char* s, int x, int y, int size, unsigned char r, unsigned char g,
               unsigned char b, unsigned char a = 255);
     bool hasUnicodeFont() const { return unicodeFont; }
+    void set3D(bool on) { mode3d = on; }
+    bool is3D() const { return mode3d; }
+    void setMouseCapture(bool on);
+    void resetCamera();
+    float cameraYaw() const { return camYaw; }
     bool vhsEnabled() const { return vhsOn; }
     bool gridEnabled() const { return drawGrid; }
 
@@ -88,5 +94,11 @@ private:
 
     void detectVendor();
     void drawSceneImpl(const game::World& world);
+    void drawScene2DImpl(const game::World& world);
+    void drawScene3DImpl(const game::World& world);
     void drawHudImpl(const game::World& world, const std::string& status, const UiFrame& ui);
+    bool mode3d = true;
+    bool mouseCaptured = false;
+    float camYaw = 0.0f;
+    float camPitch = 0.0f;
 };
