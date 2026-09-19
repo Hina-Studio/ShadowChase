@@ -1,4 +1,5 @@
 #pragma once
+#include <random>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,8 @@ struct PlayerState {
     int id = -1;
     std::string name;
     Vec2 pos;
+    Vec2 prevPos;
+    double lastSpeed = 0.0;
     double yaw = 0.0;
     double hp = 100.0;
     int ammo = 0;
@@ -37,6 +40,25 @@ struct PlayerState {
     bool interact = false;
     bool alive = true;
 };
+
+struct MonsterState {
+    int id = 0;
+    Vec2 pos;
+    Vec2 patrolTarget;
+    Vec2 lastSeen;
+    double yaw = 0.0;
+    uint8_t state = 0;
+    int target = -1;
+    double loseTimer = 0.0;
+    double patrolTimer = 0.0;
+};
+
+constexpr double kMonsterSpeedPatrol = 2.0;
+constexpr double kMonsterSpeedChase = 4.6;
+constexpr double kMonsterSight = 18.0;
+constexpr double kMonsterCloseRange = 3.0;
+constexpr double kMonsterLoseTime = 3.0;
+constexpr double kPlayerMovingThreshold = 0.6;
 
 struct InputCmd {
     double moveX = 0.0;
@@ -64,6 +86,7 @@ public:
     const std::vector<PlayerState>& players() const { return players_; }
     const std::vector<Block>& blocks() const { return blocks_; }
     const std::vector<SimObject>& objects() const { return objects_; }
+    const std::vector<MonsterState>& monsters() const { return monsters_; }
     const std::vector<Vec2>& spawns() const { return spawns_; }
     int size() const { return size_; }
     unsigned int seed() const { return seed_; }
@@ -81,6 +104,9 @@ private:
     void movePlayer(PlayerState& p, const InputCmd& cmd, double dt);
     void handleInteract(PlayerState& p);
     void refreshDynamicBlocks();
+    void updateMonsters(double dt);
+    bool hasLineOfSight(const Vec2& a, const Vec2& b) const;
+    Vec2 randomFreeSpot();
     bool blockedOnAxis(double x, double z) const;
 
     int size_ = 48;
@@ -95,5 +121,7 @@ private:
     std::vector<unsigned char> grid_;
     std::vector<unsigned char> dynamicGrid_;
     std::vector<SimObject> objects_;
+    std::vector<MonsterState> monsters_;
+    std::mt19937 rng_;
 };
 }

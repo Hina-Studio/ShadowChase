@@ -279,6 +279,14 @@ std::vector<uint8_t> encodeSnapshot(const Snapshot& snap) {
         w.u8(o.flags);
         w.i16(static_cast<int16_t>(o.holder));
     }
+    w.u16(static_cast<uint16_t>(snap.monsters.size()));
+    for (const auto& m : snap.monsters) {
+        w.u16(static_cast<uint16_t>(m.id));
+        w.i16(quantPos(m.x));
+        w.i16(quantPos(m.z));
+        w.u8(quantYaw(m.yaw));
+        w.u8(m.state);
+    }
     return w.data();
 }
 
@@ -339,6 +347,28 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         o.flags = flags;
         o.holder = holder;
         snap.objects.push_back(o);
+    }
+
+    uint16_t mcount = 0;
+    if (!r.u16(mcount)) return false;
+    snap.monsters.clear();
+    snap.monsters.reserve(mcount);
+    for (uint16_t i = 0; i < mcount; ++i) {
+        uint16_t id = 0;
+        int16_t qx = 0;
+        int16_t qz = 0;
+        uint8_t yaw = 0;
+        uint8_t st = 0;
+        if (!r.u16(id) || !r.i16(qx) || !r.i16(qz) || !r.u8(yaw) || !r.u8(st)) {
+            return false;
+        }
+        SnapshotMonster m;
+        m.id = id;
+        m.x = static_cast<float>(dequantPos(qx));
+        m.z = static_cast<float>(dequantPos(qz));
+        m.yaw = static_cast<float>(dequantYaw(yaw));
+        m.state = st;
+        snap.monsters.push_back(m);
     }
     return true;
 }

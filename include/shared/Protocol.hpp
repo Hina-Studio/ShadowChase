@@ -38,11 +38,20 @@ struct SnapshotObject {
     int holder = -1;
 };
 
+struct SnapshotMonster {
+    int id = 0;
+    float x = 0.0f;
+    float z = 0.0f;
+    float yaw = 0.0f;
+    uint8_t state = 0;
+};
+
 struct Snapshot {
     uint32_t tick = 0;
     bool baseline = false;
     std::vector<SnapshotPlayer> players;
     std::vector<SnapshotObject> objects;
+    std::vector<SnapshotMonster> monsters;
 };
 
 struct WelcomeObject {

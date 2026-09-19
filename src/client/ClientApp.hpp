@@ -37,6 +37,10 @@ struct ClientDebugState {
     int mapSize = 0;
     int blockCount = 0;
     int objectCount = 0;
+    int monsterCount = 0;
+    int monsterState = -1;
+    double monsterX = 0.0;
+    double monsterZ = 0.0;
     double ownX = 0.0;
     double ownZ = 0.0;
     float hp = 100.0f;
@@ -80,6 +84,7 @@ private:
 
     std::unordered_map<int, sc::SnapshotPlayer> netPlayers_;
     std::unordered_map<int, sc::SnapshotObject> netObjects_;
+    std::unordered_map<int, sc::SnapshotMonster> netMonsters_;
     uint32_t serverTick_ = 0;
 
     double inputTimer_ = 0.0;

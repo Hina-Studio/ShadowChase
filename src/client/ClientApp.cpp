@@ -168,12 +168,16 @@ void ClientApp::handleEvents() {
                     if (snap.baseline) {
                         netPlayers_.clear();
                         netObjects_.clear();
+                        netMonsters_.clear();
                     }
                     for (const auto& p : snap.players) {
                         netPlayers_[p.id] = p;
                     }
                     for (const auto& o : snap.objects) {
                         netObjects_[o.id] = o;
+                    }
+                    for (const auto& m : snap.monsters) {
+                        netMonsters_[m.id] = m;
                     }
                     rebuildDynamicGrid();
 
@@ -366,6 +370,16 @@ void ClientApp::render() {
         Vector3 b{p.x, 1.25f, p.z};
         DrawCapsule(a, b, 0.35f, 8, 8, colorForId(p.id));
     }
+
+    for (const auto& kv : netMonsters_) {
+        const sc::SnapshotMonster& m = kv.second;
+        bool chasing = m.state == 1;
+        Color c = chasing ? Color{255, 70, 70, 255} : Color{240, 150, 60, 255};
+        Vector3 a{m.x, 0.5f, m.z};
+        Vector3 b{m.x, 1.8f, m.z};
+        DrawCapsule(a, b, 0.5f, 8, 8, c);
+        DrawCapsuleWires(a, b, 0.5f, 8, 8, Color{60, 20, 20, 255});
+    }
     EndMode3D();
 
     DrawLine(GetScreenWidth() / 2 - 8, GetScreenHeight() / 2, GetScreenWidth() / 2 + 8,
@@ -382,6 +396,13 @@ void ClientApp::render() {
     dbg_.mapSize = mapSize_;
     dbg_.blockCount = static_cast<int>(blocks_.size());
     dbg_.objectCount = static_cast<int>(netObjects_.size());
+    dbg_.monsterCount = static_cast<int>(netMonsters_.size());
+    dbg_.monsterState = -1;
+    for (const auto& kv : netMonsters_) {
+        dbg_.monsterState = kv.second.state;
+        dbg_.monsterX = kv.second.x;
+        dbg_.monsterZ = kv.second.z;
+    }
     dbg_.ownX = predicted_.x;
     dbg_.ownZ = predicted_.z;
     dbg_.connected = connected_;

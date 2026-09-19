@@ -127,6 +127,106 @@ void Sim::generate(unsigned int seed, int size) {
         o.pos = Vec2{x + 0.5, z + 0.5};
         objects_.push_back(o);
     }
+
+    rng_.seed(seed ^ 0x5F3759DFu);
+    monsters_.clear();
+    {
+        Vec2 spot = randomFreeSpot();
+        for (int tries = 0; tries < 32; ++tries) {
+            double dc = spot.distance(Vec2{size_ / 2.0, size_ / 2.0});
+            if (dc > size_ / 3.0) break;
+            spot = randomFreeSpot();
+        }
+        MonsterState m;
+        m.id = 0;
+        m.pos = spot;
+        m.patrolTarget = randomFreeSpot();
+        m.yaw = 0.0;
+        monsters_.push_back(m);
+    }
+}
+
+bool Sim::hasLineOfSight(const Vec2& a, const Vec2& b) const {
+    const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
+    Vec2 d = b - a;
+    double dist = d.length();
+    int steps = static_cast<int>(dist / 0.4) + 1;
+    for (int i = 1; i < steps; ++i) {
+        double t = static_cast<double>(i) / static_cast<double>(steps);
+        Vec2 p = a + d * t;
+        if (blockedCell(g, size_, p.x, p.z)) return false;
+    }
+    return true;
+}
+
+Vec2 Sim::randomFreeSpot() {
+    std::uniform_int_distribution<int> dist(2, size_ - 3);
+    for (int tries = 0; tries < 64; ++tries) {
+        int x = dist(rng_);
+        int z = dist(rng_);
+        if (!blockedCell(grid_, size_, x + 0.5, z + 0.5)) {
+            return Vec2{x + 0.5, z + 0.5};
+        }
+    }
+    return Vec2{size_ / 2.0, size_ / 2.0};
+}
+
+void Sim::updateMonsters(double dt) {
+    const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
+    for (auto& m : monsters_) {
+        int seen = -1;
+        Vec2 seenPos;
+        for (const auto& p : players_) {
+            if (!p.alive) continue;
+            Vec2 d = p.pos - m.pos;
+            double dist = d.length();
+            if (dist > kMonsterSight) continue;
+            bool moving = p.lastSpeed > kPlayerMovingThreshold;
+            bool close = dist <= kMonsterCloseRange;
+            if (!moving && !close) continue;
+            Vec2 dir = d.normalized();
+            Vec2 f{std::sin(m.yaw), std::cos(m.yaw)};
+            double dot = dir.x * f.x + dir.z * f.z;
+            bool inFov = close || dot > 0.819;
+            if (inFov && hasLineOfSight(m.pos, p.pos)) {
+                seen = p.id;
+                seenPos = p.pos;
+                break;
+            }
+        }
+
+        if (seen >= 0) {
+            m.state = 1;
+            m.target = seen;
+            m.lastSeen = seenPos;
+            m.loseTimer = 0.0;
+        } else if (m.state == 1) {
+            m.loseTimer += dt;
+            if (m.loseTimer > kMonsterLoseTime) {
+                m.state = 0;
+                m.target = -1;
+                m.patrolTarget = randomFreeSpot();
+                m.patrolTimer = 0.0;
+            }
+        }
+
+        Vec2 goal = (m.state == 1) ? ((seen >= 0) ? seenPos : m.lastSeen) : m.patrolTarget;
+        Vec2 to = goal - m.pos;
+        double dist = to.length();
+        double speed = (m.state == 1) ? kMonsterSpeedChase : kMonsterSpeedPatrol;
+        if (dist > 0.08) {
+            Vec2 dir = to.normalized();
+            m.yaw = std::atan2(dir.x, dir.z);
+            moveOnGrid(m.pos, dir, speed, dt, g, size_);
+        }
+        if (m.state == 0) {
+            m.patrolTimer += dt;
+            if (dist < 0.6 || m.patrolTimer > 8.0) {
+                m.patrolTarget = randomFreeSpot();
+                m.patrolTimer = 0.0;
+            }
+        }
+    }
 }
 
 void Sim::refreshDynamicBlocks() {
@@ -188,6 +288,7 @@ int Sim::addPlayer(const std::string& name) {
     } else {
         p.pos = Vec2{size_ / 2.0, size_ / 2.0};
     }
+    p.prevPos = p.pos;
     players_.push_back(p);
     inputs_.push_back(InputCmd{});
     prevInteract_.push_back(0);
@@ -291,7 +392,10 @@ void Sim::step(double dt) {
         if (edge) {
             handleInteract(p);
         }
+        p.prevPos = p.pos;
         movePlayer(p, cmd, dt);
+        p.lastSpeed = p.pos.distance(p.prevPos) / dt;
     }
+    updateMonsters(dt);
 }
 }

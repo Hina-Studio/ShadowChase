@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -23,12 +24,15 @@ struct ClientLink {
     bool sentOnce = false;
     std::unordered_map<int, sc::SnapshotPlayer> lastPlayers;
     std::unordered_map<int, sc::SnapshotObject> lastObjects;
+    std::unordered_map<int, sc::SnapshotMonster> lastMonsters;
 };
 
 class Server {
 public:
-    bool start(int port, unsigned int seed, int mapSize, int maxPlayers, uint32_t roomCode) {
+    bool start(int port, unsigned int seed, int mapSize, int maxPlayers, uint32_t roomCode,
+               double aoiRadius) {
         roomCode_ = roomCode;
+        aoiRadius_ = aoiRadius;
         if (enet_initialize() != 0) {
             core::Logger::error("[SERVER] enet init failed");
             return false;
@@ -44,7 +48,8 @@ public:
         sim_.generate(seed, mapSize);
         core::Logger::info("[SERVER] listening port=" + std::to_string(port) + " room=" +
                            std::to_string(roomCode_) + " seed=" + std::to_string(seed) +
-                           " map=" + std::to_string(mapSize));
+                           " map=" + std::to_string(mapSize) + " aoi=" +
+                           std::to_string(static_cast<int>(aoiRadius_)));
         return true;
     }
 
@@ -202,40 +207,80 @@ private:
             if (o.taken) so.flags |= 0x02;
             objects.push_back(so);
         }
+        std::vector<sc::SnapshotMonster> monsters;
+        for (const auto& m : sim_.monsters()) {
+            sc::SnapshotMonster sm;
+            sm.id = m.id;
+            sm.x = static_cast<float>(m.pos.x);
+            sm.z = static_cast<float>(m.pos.z);
+            sm.yaw = static_cast<float>(m.yaw);
+            sm.state = m.state;
+            monsters.push_back(sm);
+        }
 
-        bool baseline = (sim_.tick() % 10) == 0;
+        bool baselineTick = (sim_.tick() % 10) == 0;
+        bool sendFar = (sim_.tick() % 4) == 0;
+        double aoi2 = aoiRadius_ * aoiRadius_;
+
         for (auto& kv : clients_) {
             ClientLink& link = kv.second;
+            sc::Vec2 own{0.0, 0.0};
+            for (const auto& p : sim_.players()) {
+                if (p.id == kv.first) own = p.pos;
+            }
+            auto farBy = [&](double x, double z) {
+                if (aoiRadius_ <= 0.0) return false;
+                double dx = x - own.x;
+                double dz = z - own.z;
+                return dx * dx + dz * dz > aoi2;
+            };
+
             sc::Snapshot snap;
             snap.tick = sim_.tick();
-            snap.baseline = baseline || !link.sentOnce;
+            snap.baseline = baselineTick || !link.sentOnce;
 
             if (snap.baseline) {
                 snap.players = players;
                 snap.objects = objects;
+                snap.monsters = monsters;
+                link.lastPlayers.clear();
+                link.lastObjects.clear();
+                link.lastMonsters.clear();
+                for (const auto& p : players) link.lastPlayers[p.id] = p;
+                for (const auto& o : objects) link.lastObjects[o.id] = o;
+                for (const auto& m : monsters) link.lastMonsters[m.id] = m;
             } else {
                 for (const auto& p : players) {
                     auto it = link.lastPlayers.find(p.id);
-                    if (it == link.lastPlayers.end() || it->second.x != p.x ||
-                        it->second.z != p.z || it->second.yaw != p.yaw ||
-                        it->second.hp != p.hp || it->second.flags != p.flags) {
-                        snap.players.push_back(p);
-                    }
+                    bool changed = it == link.lastPlayers.end() || it->second.x != p.x ||
+                                   it->second.z != p.z || it->second.yaw != p.yaw ||
+                                   it->second.hp != p.hp || it->second.flags != p.flags;
+                    if (!changed) continue;
+                    if (farBy(p.x, p.z) && !sendFar) continue;
+                    snap.players.push_back(p);
+                    link.lastPlayers[p.id] = p;
                 }
                 for (const auto& o : objects) {
                     auto it = link.lastObjects.find(o.id);
-                    if (it == link.lastObjects.end() || it->second.x != o.x ||
-                        it->second.z != o.z || it->second.flags != o.flags ||
-                        it->second.holder != o.holder) {
-                        snap.objects.push_back(o);
-                    }
+                    bool changed = it == link.lastObjects.end() || it->second.x != o.x ||
+                                   it->second.z != o.z || it->second.flags != o.flags ||
+                                   it->second.holder != o.holder;
+                    if (!changed) continue;
+                    if (farBy(o.x, o.z) && !sendFar) continue;
+                    snap.objects.push_back(o);
+                    link.lastObjects[o.id] = o;
+                }
+                for (const auto& m : monsters) {
+                    auto it = link.lastMonsters.find(m.id);
+                    bool changed = it == link.lastMonsters.end() || it->second.x != m.x ||
+                                   it->second.z != m.z || it->second.yaw != m.yaw ||
+                                   it->second.state != m.state;
+                    if (!changed) continue;
+                    if (farBy(m.x, m.z) && !sendFar) continue;
+                    snap.monsters.push_back(m);
+                    link.lastMonsters[m.id] = m;
                 }
             }
-
-            link.lastPlayers.clear();
-            link.lastObjects.clear();
-            for (const auto& p : players) link.lastPlayers[p.id] = p;
-            for (const auto& o : objects) link.lastObjects[o.id] = o;
             link.sentOnce = true;
 
             auto payload = sc::encodeSnapshot(snap);
@@ -247,6 +292,7 @@ private:
 
     ENetHost* host_ = nullptr;
     uint32_t roomCode_ = 0;
+    double aoiRadius_ = 0.0;
     sc::Sim sim_;
     std::unordered_map<int, ClientLink> clients_;
     double accumulator_ = 0.0;
@@ -260,6 +306,11 @@ struct BotClient {
     int welcomeCount = 0;
     int rejects = 0;
     int objectCount = 0;
+    int monsterCount = 0;
+    bool monsterSeen = false;
+    bool monsterMoved = false;
+    float monsterFirstX = 0.0f;
+    float monsterFirstZ = 0.0f;
     bool expectReject = false;
     double phase = 0.0;
     double inputTimer = 0.0;
@@ -306,6 +357,18 @@ struct BotClient {
                     sc::Snapshot snap;
                     if (sc::decodeSnapshot(event.packet->data, event.packet->dataLength, snap)) {
                         ++snapshots;
+                        for (const auto& m : snap.monsters) {
+                            ++monsterCount;
+                            if (!monsterSeen) {
+                                monsterSeen = true;
+                                monsterFirstX = m.x;
+                                monsterFirstZ = m.z;
+                            } else if (std::fabs(m.x - monsterFirstX) +
+                                           std::fabs(m.z - monsterFirstZ) >
+                                       0.8f) {
+                                monsterMoved = true;
+                            }
+                        }
                     }
                 } else if (type == static_cast<uint8_t>(sc::MsgType::Reject)) {
                     uint8_t reason = 0;
@@ -352,7 +415,7 @@ struct BotClient {
 int runSelfTest(int port, double seconds) {
     const uint32_t roomCode = 12345678u;
     Server server;
-    if (!server.start(port, 20260919u, 48, 16, roomCode)) return 2;
+    if (!server.start(port, 20260919u, 48, 16, roomCode, 10.0)) return 2;
 
     BotClient botA;
     BotClient botB;
@@ -401,6 +464,11 @@ int runSelfTest(int port, double seconds) {
         core::Logger::error("[SELFTEST] wrong room code was not rejected");
         ok = false;
     }
+    if (botA.monsterCount <= 0 || !botA.monsterMoved) {
+        core::Logger::error("[SELFTEST] monster not synced/moved (count=" +
+                            std::to_string(botA.monsterCount) + ")");
+        ok = false;
+    }
     const auto& players = server.sim().players();
     if (players.size() == 2) {
         if (players[0].pos.x == players[1].pos.x && players[0].pos.z == players[1].pos.z) {
@@ -420,6 +488,8 @@ int runSelfTest(int port, double seconds) {
                        " snapB=" + std::to_string(botB.snapshots) +
                        " objects=" + std::to_string(botA.objectCount) +
                        " badReject=" + std::to_string(botBad.rejects) +
+                       " monsters=" + std::to_string(botA.monsterCount) +
+                       " monsterMoved=" + std::string(botA.monsterMoved ? "1" : "0") +
                        " speedRejects=" + std::to_string(server.sim().rejects()) +
                        " ticks=" + std::to_string(server.sim().tick()));
 
@@ -440,6 +510,7 @@ int main(int argc, char** argv) {
     unsigned int seed = static_cast<unsigned int>(
         std::stoul(core::Config::instance().get("server.seed", "20260919")));
     double selftest = std::stod(core::Config::instance().get("server.selftest", "0"));
+    double aoiRadius = std::stod(core::Config::instance().get("server.aoi", "12"));
     uint32_t roomCode = static_cast<uint32_t>(
         std::stoul(core::Config::instance().get("server.roomcode", "0")));
 
@@ -453,6 +524,8 @@ int main(int argc, char** argv) {
             seed = static_cast<unsigned int>(std::stoul(argv[++i]));
         } else if (arg == "--room" && i + 1 < argc) {
             roomCode = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--aoi" && i + 1 < argc) {
+            aoiRadius = std::stod(argv[++i]);
         }
     }
 
@@ -465,7 +538,7 @@ int main(int argc, char** argv) {
     }
 
     Server server;
-    if (!server.start(port, seed, mapSize, maxPlayers, roomCode)) return 2;
+    if (!server.start(port, seed, mapSize, maxPlayers, roomCode, aoiRadius)) return 2;
 
     core::Logger::info("[SERVER] share code: " + std::to_string(roomCode) +
                        "  (client: SlashCoClient --room " + std::to_string(roomCode) + ")");
