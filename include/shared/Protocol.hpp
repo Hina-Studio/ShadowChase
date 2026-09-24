@@ -83,7 +83,9 @@ struct WelcomeData {
     uint32_t roomCode = 0;
     int playerId = -1;
     unsigned int seed = 0;
-    int mapSize = 0;
+    int mapCols = 0;
+    int mapRows = 0;
+    float cellSize = 2.0f;
     std::vector<Block> blocks;
     std::vector<WelcomeObject> objects;
     std::string version;

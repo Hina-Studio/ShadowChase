@@ -60,12 +60,12 @@ public:
             core::Logger::error("[SERVER] host create failed");
             return false;
         }
-        sim_.generate(seed, mapSize);
-        core::Logger::info("[SERVER] layout: " + sim_.layoutReason() + " fuelCans=" +
-                           std::to_string(sim_.fuelCansInWorld()));
+        sim_.generate(seed);
+        core::Logger::info("[SERVER] layout: " + sim_.layoutReason() + " map=" +
+                           std::to_string(sim_.cols()) + "x" + std::to_string(sim_.rows()) +
+                           " fuelCans=" + std::to_string(sim_.fuelCansInWorld()));
         core::Logger::info("[SERVER] listening port=" + std::to_string(port) + " room=" +
-                           std::to_string(roomCode_) + " seed=" + std::to_string(seed) +
-                           " map=" + std::to_string(mapSize) + " aoi=" +
+                           std::to_string(roomCode_) + " seed=" + std::to_string(seed) + " aoi=" +
                            std::to_string(static_cast<int>(aoiRadius_)));
         return true;
     }
@@ -191,7 +191,9 @@ private:
             welcome.roomCode = roomCode_;
             welcome.playerId = id;
             welcome.seed = sim_.seed();
-            welcome.mapSize = sim_.size();
+            welcome.mapCols = sim_.cols();
+            welcome.mapRows = sim_.rows();
+            welcome.cellSize = static_cast<float>(sim_.cellSize());
             welcome.version = SLASHCO_VERSION;
             welcome.blocks = sim_.blocks();
             for (const auto& o : sim_.objects()) {
@@ -566,7 +568,7 @@ int runSelfTest(int port, double seconds) {
 }
 bool runQuestSelfTest() {
     sc::Sim sim;
-    sim.generate(777u, 48);
+    sim.generate(777u);
     int pid = sim.addPlayer("QuestBot");
     sim.addPlayer("Idle1");
     sim.addPlayer("Idle2");
@@ -667,6 +669,26 @@ bool runQuestSelfTest() {
             core::Logger::error("[QUEST] file collection failed");
             return false;
         }
+    }
+
+    bool trapOk = false;
+    for (const auto& o : sim.objects()) {
+        if (o.type != sc::ObjType::Trap || o.taken) continue;
+        sim.debugTeleportPlayer(pid, o.pos.x, o.pos.z);
+        double before = sim.players()[static_cast<size_t>(pid)].hp;
+        sim.step(0.05);
+        sim.step(0.05);
+        double after = sim.players()[static_cast<size_t>(pid)].hp;
+        if (after < before) {
+            trapOk = true;
+            core::Logger::info("[QUEST] trap works (hp " + std::to_string(before) + " -> " +
+                               std::to_string(after) + ")");
+        }
+        break;
+    }
+    if (!trapOk) {
+        core::Logger::error("[QUEST] trap did not damage player");
+        return false;
     }
 
     const sc::SimObject* vehicle = nullptr;

@@ -1,9 +1,26 @@
 #include "shared/Sim.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <queue>
 #include <random>
 
+#include "shared/MapData.hpp"
+
 namespace sc {
+namespace {
+constexpr int kDir4[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+int cellOf(double v) {
+    return static_cast<int>(std::floor(v / kCellSize));
+}
+
+Vec2 centerOf(int c, int r) {
+    return Vec2{static_cast<double>(c) * kCellSize + kCellSize * 0.5,
+                static_cast<double>(r) * kCellSize + kCellSize * 0.5};
+}
+}
+
 InputCmd sanitizeInput(const InputCmd& in) {
     InputCmd out = in;
     out.moveX = std::max(-1.0, std::min(1.0, out.moveX));
@@ -18,77 +35,138 @@ InputCmd sanitizeInput(const InputCmd& in) {
     return out;
 }
 
-void Sim::generate(unsigned int seed, int size) {
+int Sim::roomIdAt(const Vec2& p) const {
+    int c = cellOf(p.x);
+    int r = cellOf(p.z);
+    if (c < 0 || r < 0 || c >= cols_ || r >= rows_) return -1;
+    return room_[static_cast<size_t>(r) * static_cast<size_t>(cols_) + static_cast<size_t>(c)];
+}
+
+bool Sim::blockedCell(const std::vector<unsigned char>& grid, int cols, int rows, double x,
+                      double z) {
+    int c = cellOf(x);
+    int r = cellOf(z);
+    if (c < 0 || r < 0 || c >= cols || r >= rows) return true;
+    return grid[static_cast<size_t>(r) * static_cast<size_t>(cols) + static_cast<size_t>(c)] != 0;
+}
+
+void Sim::moveOnGrid(Vec2& pos, const Vec2& dir, double speed, double dt,
+                     const std::vector<unsigned char>& grid, int cols, int rows) {
+    double r = kPlayerRadius;
+    auto freeAt = [&](double x, double z) {
+        return !blockedCell(grid, cols, rows, x - r, z - r) &&
+               !blockedCell(grid, cols, rows, x + r, z - r) &&
+               !blockedCell(grid, cols, rows, x - r, z + r) &&
+               !blockedCell(grid, cols, rows, x + r, z + r);
+    };
+    double nx = pos.x + dir.x * speed * dt;
+    if (freeAt(nx, pos.z)) pos.x = nx;
+    double nz = pos.z + dir.z * speed * dt;
+    if (freeAt(pos.x, nz)) pos.z = nz;
+}
+
+void Sim::generate(unsigned int seed) {
     seed_ = seed;
-    size_ = std::max(16, std::min(96, size));
     tick_ = 0;
+    rejects_ = 0;
     blocks_.clear();
     spawns_.clear();
     players_.clear();
     inputs_.clear();
-    grid_.assign(static_cast<size_t>(size_) * static_cast<size_t>(size_), 0);
-
-    auto setBlock = [&](int x, int z) {
-        if (x < 0 || z < 0 || x >= size_ || z >= size_) return;
-        grid_[static_cast<size_t>(z) * static_cast<size_t>(size_) + static_cast<size_t>(x)] = 1;
-        blocks_.push_back(Block{x, z});
-    };
-
-    for (int i = 0; i < size_; ++i) {
-        setBlock(i, 0);
-        setBlock(i, size_ - 1);
-        setBlock(0, i);
-        setBlock(size_ - 1, i);
-    }
-
-    std::mt19937 rng(seed);
-    int interior = size_ - 4;
-    int blockCount = interior * interior / 22;
-    std::uniform_int_distribution<int> dist(2, size_ - 3);
-    for (int i = 0; i < blockCount; ++i) {
-        int x = dist(rng);
-        int z = dist(rng);
-        if (grid_[static_cast<size_t>(z) * static_cast<size_t>(size_) + static_cast<size_t>(x)] == 0) {
-            setBlock(x, z);
-        }
-    }
-
-    double center = static_cast<double>(size_) / 2.0;
-    double ring = center - 4.0;
-    for (int i = 0; i < 16; ++i) {
-        double a = (6.28318530717958647692 * static_cast<double>(i)) / 16.0;
-        Vec2 p{center + std::cos(a) * ring, center + std::sin(a) * ring};
-        spawns_.push_back(p);
-        int gx = static_cast<int>(p.x);
-        int gz = static_cast<int>(p.z);
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dz = -1; dz <= 1; ++dz) {
-                int cx = gx + dx;
-                int cz = gz + dz;
-                if (cx > 0 && cz > 0 && cx < size_ - 1 && cz < size_ - 1) {
-                    grid_[static_cast<size_t>(cz) * static_cast<size_t>(size_) + static_cast<size_t>(cx)] = 0;
-                }
-            }
-        }
-    }
-    blocks_.clear();
-    for (int z = 0; z < size_; ++z) {
-        for (int x = 0; x < size_; ++x) {
-            if (grid_[static_cast<size_t>(z) * static_cast<size_t>(size_) + static_cast<size_t>(x)] != 0) {
-                blocks_.push_back(Block{x, z});
-            }
-        }
-    }
-
-    dynamicGrid_ = grid_;
-    rng_.seed(seed ^ 0x5F3759DFu);
-    actionRng_.seed(seed ^ 0x00C0FFEEu);
+    prevInteract_.clear();
+    prevHeldInteract_.clear();
+    prevButtons_.clear();
+    objects_.clear();
+    monsters_.clear();
+    noises_.clear();
     matchTime_ = 0.0;
     rageActive_ = false;
     filesRequired_ = 0;
     helicopterSpawned_ = false;
-    noises_.clear();
     status_ = 0;
+    vehicleId_ = -1;
+    activeExit_ = -1;
+
+    const auto& rows = maloneFarmMap();
+    rows_ = static_cast<int>(rows.size());
+    cols_ = 0;
+    for (const auto& line : rows) {
+        cols_ = std::max(cols_, static_cast<int>(line.size()));
+    }
+    grid_.assign(static_cast<size_t>(cols_) * static_cast<size_t>(rows_), 1);
+    grass_.assign(grid_.size(), 0);
+    room_.assign(grid_.size(), -1);
+    genCandidates_.clear();
+    lootCandidates_.clear();
+    trapCandidates_.clear();
+    exitCandidates_.clear();
+    spawnCandidates_.clear();
+
+    for (int r = 0; r < rows_; ++r) {
+        const std::string& line = rows[static_cast<size_t>(r)];
+        for (int c = 0; c < cols_; ++c) {
+            char ch = c < static_cast<int>(line.size()) ? line[static_cast<size_t>(c)] : '#';
+            size_t idx = static_cast<size_t>(r) * static_cast<size_t>(cols_) + static_cast<size_t>(c);
+            Vec2 center = centerOf(c, r);
+            switch (ch) {
+                case '#':
+                    grid_[idx] = 1;
+                    blocks_.push_back(Block{c, r});
+                    break;
+                case '~':
+                    grid_[idx] = 0;
+                    grass_[idx] = 1;
+                    break;
+                case '.':
+                    grid_[idx] = 0;
+                    break;
+                case 'D': {
+                    grid_[idx] = 0;
+                    SimObject d;
+                    d.id = 0;
+                    d.type = ObjType::Door;
+                    d.pos = center;
+                    d.open = true;
+                    objects_.push_back(d);
+                    break;
+                }
+                case 'G':
+                    grid_[idx] = 0;
+                    genCandidates_.push_back(center);
+                    break;
+                case 'L':
+                    grid_[idx] = 0;
+                    lootCandidates_.push_back(center);
+                    break;
+                case 'T':
+                    grid_[idx] = 0;
+                    trapCandidates_.push_back(center);
+                    break;
+                case 'E':
+                    grid_[idx] = 0;
+                    exitCandidates_.push_back(center);
+                    break;
+                case 'S':
+                    grid_[idx] = 0;
+                    spawnCandidates_.push_back(center);
+                    break;
+                case 'W':
+                    grid_[idx] = 0;
+                    break;
+                default:
+                    grid_[idx] = 0;
+                    break;
+            }
+        }
+    }
+
+    for (const auto& s : spawnCandidates_) {
+        spawns_.push_back(s);
+    }
+
+    buildRooms();
+    rng_.seed(seed ^ 0x5F3759DFu);
+    actionRng_.seed(seed ^ 0x00C0FFEEu);
 
     bool valid = false;
     std::string reason;
@@ -106,185 +184,320 @@ void Sim::generate(unsigned int seed, int size) {
         layoutReason_ = "ok";
     }
 
-    monsters_.clear();
-    {
-        Vec2 spot = randomFreeSpot();
-        for (int tries = 0; tries < 32; ++tries) {
-            double dc = spot.distance(Vec2{size_ / 2.0, size_ / 2.0});
-            if (dc > size_ / 3.0) break;
-            spot = randomFreeSpot();
+    Vec2 farCell = spawns_.empty() ? centerOf(cols_ / 2, rows_ / 2) : spawns_[0];
+    double bestD = -1.0;
+    for (int r = 0; r < rows_; ++r) {
+        for (int c = 0; c < cols_; ++c) {
+            size_t idx = static_cast<size_t>(r) * static_cast<size_t>(cols_) + static_cast<size_t>(c);
+            if (grid_[idx] != 0) continue;
+            Vec2 p = centerOf(c, r);
+            double d = p.distance(spawns_.empty() ? p : spawns_[0]);
+            if (d > bestD) {
+                bestD = d;
+                farCell = p;
+            }
         }
-        MonsterState m;
-        m.id = 0;
-        m.pos = spot;
-        m.patrolTarget = randomFreeSpot();
-        m.yaw = 0.0;
-        monsters_.push_back(m);
+    }
+    MonsterState m;
+    m.id = 0;
+    m.pos = farCell;
+    m.patrolTarget = farCell;
+    monsters_.push_back(m);
+}
+
+void Sim::buildRooms() {
+    room_.assign(static_cast<size_t>(cols_) * static_cast<size_t>(rows_), -1);
+    int nextRoom = 0;
+    for (int r = 0; r < rows_; ++r) {
+        for (int c = 0; c < cols_; ++c) {
+            size_t idx = static_cast<size_t>(r) * static_cast<size_t>(cols_) + static_cast<size_t>(c);
+            if (grid_[idx] != 0 || room_[idx] != -1) continue;
+            bool doorCell = false;
+            for (const auto& o : objects_) {
+                if (o.type != ObjType::Door) continue;
+                if (cellOf(o.pos.x) == c && cellOf(o.pos.z) == r) doorCell = true;
+            }
+            if (doorCell) {
+                room_[idx] = -2;
+                continue;
+            }
+            std::vector<int> queue;
+            queue.push_back(r * cols_ + c);
+            room_[idx] = nextRoom;
+            size_t head = 0;
+            while (head < queue.size()) {
+                int cur = queue[head++];
+                int cx = cur % cols_;
+                int cz = cur / cols_;
+                for (const auto& d : kDir4) {
+                    int nx = cx + d[0];
+                    int nz = cz + d[1];
+                    if (nx < 0 || nz < 0 || nx >= cols_ || nz >= rows_) continue;
+                    size_t nidx = static_cast<size_t>(nz) * static_cast<size_t>(cols_) + static_cast<size_t>(nx);
+                    if (grid_[nidx] != 0 || room_[nidx] != -1) continue;
+                    bool ndoor = false;
+                    for (const auto& o : objects_) {
+                        if (o.type != ObjType::Door) continue;
+                        if (cellOf(o.pos.x) == nx && cellOf(o.pos.z) == nz) ndoor = true;
+                    }
+                    if (ndoor) {
+                        room_[nidx] = -2;
+                        continue;
+                    }
+                    room_[nidx] = nextRoom;
+                    queue.push_back(nz * cols_ + nx);
+                }
+            }
+            ++nextRoom;
+        }
     }
 }
 
-void Sim::placeQuestObjects() {
-    objects_.clear();
-    vehicleId_ = -1;
-    status_ = 0;
-    int nextId = 1;
+bool Sim::passableCell(int c, int r) const {
+    if (c < 0 || r < 0 || c >= cols_ || r >= rows_) return false;
+    size_t idx = static_cast<size_t>(r) * static_cast<size_t>(cols_) + static_cast<size_t>(c);
+    const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
+    return g[idx] == 0;
+}
 
-    for (int i = 0; i < 4; ++i) {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Door;
-        o.pos = p;
-        if ((actionRng_() % 100) < 40) {
-            o.phase = 1;
+std::vector<Vec2> Sim::findPath(const Vec2& from, const Vec2& to) const {
+    std::vector<Vec2> out;
+    int sc = cellOf(from.x);
+    int sr = cellOf(from.z);
+    int tc = cellOf(to.x);
+    int tr = cellOf(to.z);
+    if (sc == tc && sr == tr) return out;
+    if (!passableCell(tc, tr)) return out;
+
+    const int total = cols_ * rows_;
+    std::vector<int> came(static_cast<size_t>(total), -1);
+    std::vector<double> gScore(static_cast<size_t>(total), 1e18);
+    auto heur = [&](int c, int r) {
+        return static_cast<double>(std::abs(c - tc) + std::abs(r - tr));
+    };
+    struct Node {
+        double f;
+        int id;
+        bool operator<(const Node& o) const { return f > o.f; }
+    };
+    std::priority_queue<Node> open;
+    int startId = sr * cols_ + sc;
+    int goalId = tr * cols_ + tc;
+    gScore[static_cast<size_t>(startId)] = 0.0;
+    came[static_cast<size_t>(startId)] = startId;
+    open.push(Node{heur(sc, sr), startId});
+
+    while (!open.empty()) {
+        Node cur = open.top();
+        open.pop();
+        if (cur.id == goalId) break;
+        int cx = cur.id % cols_;
+        int cz = cur.id / cols_;
+        for (const auto& d : kDir4) {
+            int nx = cx + d[0];
+            int nz = cz + d[1];
+            if (!passableCell(nx, nz)) continue;
+            int nid = nz * cols_ + nx;
+            double ng = gScore[static_cast<size_t>(cur.id)] + 1.0;
+            if (ng >= gScore[static_cast<size_t>(nid)]) continue;
+            gScore[static_cast<size_t>(nid)] = ng;
+            came[static_cast<size_t>(nid)] = cur.id;
+            open.push(Node{ng + heur(nx, nz), nid});
         }
-        objects_.push_back(o);
     }
-    for (int i = 0; i < 6; ++i) {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Crate;
-        o.pos = p;
-        objects_.push_back(o);
+    if (came[static_cast<size_t>(goalId)] == -1) return out;
+
+    std::vector<int> rev;
+    for (int id = goalId; id != startId; id = came[static_cast<size_t>(id)]) {
+        rev.push_back(id);
     }
-    for (int i = 0; i < 6; ++i) {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Pickup;
-        o.pos = p;
-        objects_.push_back(o);
+    std::reverse(rev.begin(), rev.end());
+    for (int id : rev) {
+        out.push_back(centerOf(id % cols_, id / cols_));
     }
-    for (int i = 0; i < kFuelCanTotal; ++i) {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::FuelCan;
-        o.pos = p;
-        objects_.push_back(o);
-    }
-    for (int i = 0; i < kBatteryTotal; ++i) {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Battery;
-        o.pos = p;
-        objects_.push_back(o);
-    }
-    for (int i = 0; i < kFileTotal; ++i) {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::File;
-        o.pos = p;
-        objects_.push_back(o);
-    }
-    for (int i = 0; i < kMasterLockTotal; ++i) {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::MasterLock;
-        o.pos = p;
-        objects_.push_back(o);
-    }
-    for (int i = 0; i < kGeneratorCount; ++i) {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Generator;
-        o.pos = p;
-        objects_.push_back(o);
-    }
-    {
-        Vec2 p = randomFreeSpot();
-        SimObject o;
-        o.id = nextId++;
-        o.type = ObjType::Vehicle;
-        o.pos = p;
-        objects_.push_back(o);
-        vehicleId_ = o.id;
-    }
+    return out;
 }
 
 bool Sim::reachableFrom(const Vec2& start, const Vec2& goal,
                         const std::vector<unsigned char>& grid) const {
-    int sx = static_cast<int>(std::floor(start.x));
-    int sz = static_cast<int>(std::floor(start.z));
-    int gx = static_cast<int>(std::floor(goal.x));
-    int gz = static_cast<int>(std::floor(goal.z));
-    if (sx < 0 || sz < 0 || sx >= size_ || sz >= size_) return false;
-    if (gx < 0 || gz < 0 || gx >= size_ || gz >= size_) return false;
+    int sc = cellOf(start.x);
+    int sr = cellOf(start.z);
+    int tc = cellOf(goal.x);
+    int tr = cellOf(goal.z);
+    if (sc < 0 || sr < 0 || sc >= cols_ || sr >= rows_) return false;
+    if (tc < 0 || tr < 0 || tc >= cols_ || tr >= rows_) return false;
+    if (grid[static_cast<size_t>(sr) * static_cast<size_t>(cols_) + static_cast<size_t>(sc)] != 0) {
+        return false;
+    }
 
-    std::vector<unsigned char> seen(static_cast<size_t>(size_) * static_cast<size_t>(size_), 0);
+    std::vector<unsigned char> seen(static_cast<size_t>(cols_) * static_cast<size_t>(rows_), 0);
     std::vector<int> queue;
-    queue.push_back(sz * size_ + sx);
-    seen[static_cast<size_t>(sz) * static_cast<size_t>(size_) + static_cast<size_t>(sx)] = 1;
-    const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    queue.push_back(sr * cols_ + sc);
+    seen[static_cast<size_t>(sr) * static_cast<size_t>(cols_) + static_cast<size_t>(sc)] = 1;
     size_t head = 0;
     while (head < queue.size()) {
         int cur = queue[head++];
-        int cx = cur % size_;
-        int cz = cur / size_;
-        if (cx == gx && cz == gz) return true;
-        for (const auto& d : dirs) {
+        int cx = cur % cols_;
+        int cz = cur / cols_;
+        if (cx == tc && cz == tr) return true;
+        for (const auto& d : kDir4) {
             int nx = cx + d[0];
             int nz = cz + d[1];
-            if (nx < 0 || nz < 0 || nx >= size_ || nz >= size_) continue;
-            if (grid[static_cast<size_t>(nz) * static_cast<size_t>(size_) + static_cast<size_t>(nx)] != 0) {
-                continue;
-            }
-            size_t idx = static_cast<size_t>(nz) * static_cast<size_t>(size_) + static_cast<size_t>(nx);
-            if (seen[idx]) continue;
-            seen[idx] = 1;
-            queue.push_back(nz * size_ + nx);
+            if (nx < 0 || nz < 0 || nx >= cols_ || nz >= rows_) continue;
+            size_t nidx = static_cast<size_t>(nz) * static_cast<size_t>(cols_) + static_cast<size_t>(nx);
+            if (seen[nidx] || grid[nidx] != 0) continue;
+            seen[nidx] = 1;
+            queue.push_back(nz * cols_ + nx);
         }
     }
     return false;
 }
 
+void Sim::placeQuestObjects() {
+    std::vector<SimObject> doors;
+    std::vector<SimObject> towers;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::Door) doors.push_back(o);
+        if (o.type == ObjType::WaterTower) towers.push_back(o);
+    }
+    objects_.clear();
+    for (auto& d : doors) {
+        d.open = true;
+        d.phase = ((actionRng_() % 100) < 25) ? 1 : 0;
+        objects_.push_back(d);
+    }
+    for (int r = 0; r < rows_; ++r) {
+        for (int c = 0; c < cols_; ++c) {
+            const std::string& line = maloneFarmMap()[static_cast<size_t>(r)];
+            if (c < static_cast<int>(line.size()) && line[static_cast<size_t>(c)] == 'W') {
+                SimObject w;
+                w.id = 0;
+                w.type = ObjType::WaterTower;
+                w.pos = centerOf(c, r);
+                objects_.push_back(w);
+            }
+        }
+    }
+    (void)towers;
+
+    std::vector<Vec2> gens = genCandidates_;
+    std::shuffle(gens.begin(), gens.end(), rng_);
+    if (static_cast<int>(gens.size()) > kActiveGenerators) gens.resize(kActiveGenerators);
+
+    std::vector<Vec2> loot = lootCandidates_;
+    std::shuffle(loot.begin(), loot.end(), rng_);
+    size_t lootIdx = 0;
+    auto nextLoot = [&]() -> Vec2 {
+        if (loot.empty()) return centerOf(cols_ / 2, rows_ / 2);
+        Vec2 p = loot[lootIdx % loot.size()];
+        ++lootIdx;
+        return p;
+    };
+
+    if (!exitCandidates_.empty()) {
+        activeExit_ = static_cast<int>(actionRng_() % exitCandidates_.size());
+    }
+
+    int nextId = 1;
+    for (const auto& g : gens) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Generator;
+        o.pos = g;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kFuelCanTotal; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::FuelCan;
+        o.pos = nextLoot();
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kBatteryTotal; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Battery;
+        o.pos = nextLoot();
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kFileTotal; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::File;
+        o.pos = nextLoot();
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < 4; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Crate;
+        o.pos = nextLoot();
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < 4; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Pickup;
+        o.pos = nextLoot();
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kMasterLockTotal; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::MasterLock;
+        o.pos = nextLoot();
+        objects_.push_back(o);
+    }
+    for (const auto& t : trapCandidates_) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Trap;
+        o.pos = t;
+        o.taken = false;
+        objects_.push_back(o);
+    }
+}
+
 bool Sim::validateLayout(std::string& reason) const {
-    int required = kGeneratorFuelNeed * kGeneratorCount;
-    if (fuelCansInWorld() < (required * 13) / 10 + 1) {
+    int required = kGeneratorFuelNeed * kActiveGenerators;
+    int fuel = 0;
+    int battery = 0;
+    int file = 0;
+    for (const auto& o : objects_) {
+        if (o.taken) continue;
+        if (o.type == ObjType::FuelCan) ++fuel;
+        if (o.type == ObjType::Battery) ++battery;
+        if (o.type == ObjType::File) ++file;
+    }
+    if (fuel < (required * 13) / 10 + 1) {
         reason = "fuel redundancy below 1.3x";
         return false;
     }
-    int batteries = 0;
-    int files = 0;
-    for (const auto& o : objects_) {
-        if (o.taken) continue;
-        if (o.type == ObjType::Battery) ++batteries;
-        if (o.type == ObjType::File) ++files;
-    }
-    if (batteries < (kGeneratorCount * 13) / 10 + 1) {
+    if (battery < (kActiveGenerators * 13) / 10 + 1) {
         reason = "battery redundancy below 1.3x";
         return false;
     }
-    if (files < kFilesForBigTeam) {
+    if (file < kFilesForBigTeam) {
         reason = "not enough files";
         return false;
     }
+    if (activeExit_ < 0 || exitCandidates_.empty()) {
+        reason = "no exit";
+        return false;
+    }
+    Vec2 exitPos = exitCandidates_[static_cast<size_t>(activeExit_)];
 
     std::vector<unsigned char> passable = grid_;
     for (const auto& o : objects_) {
         if (o.type != ObjType::Door) continue;
-        int gx = static_cast<int>(std::floor(o.pos.x));
-        int gz = static_cast<int>(std::floor(o.pos.z));
-        if (gx < 0 || gz < 0 || gx >= size_ || gz >= size_) continue;
-        passable[static_cast<size_t>(gz) * static_cast<size_t>(size_) + static_cast<size_t>(gx)] = 0;
-    }
-
-    const SimObject* vehicle = nullptr;
-    for (const auto& o : objects_) {
-        if (o.type == ObjType::Vehicle) vehicle = &o;
-    }
-    if (!vehicle) {
-        reason = "no vehicle";
-        return false;
+        int c = cellOf(o.pos.x);
+        int r = cellOf(o.pos.z);
+        if (c < 0 || r < 0 || c >= cols_ || r >= rows_) continue;
+        passable[static_cast<size_t>(r) * static_cast<size_t>(cols_) + static_cast<size_t>(c)] = 0;
     }
     for (const auto& s : spawns_) {
-        if (!reachableFrom(s, vehicle->pos, passable)) {
-            reason = "spawn cannot reach vehicle";
+        if (!reachableFrom(s, exitPos, passable)) {
+            reason = "spawn cannot reach exit";
             return false;
         }
     }
@@ -309,105 +522,370 @@ bool Sim::validateLayout(std::string& reason) const {
 }
 
 void Sim::applyFallback() {
-    objects_.clear();
-    vehicleId_ = -1;
-    status_ = 0;
+    std::vector<SimObject> keep;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::Door || o.type == ObjType::WaterTower) {
+            SimObject d = o;
+            if (d.type == ObjType::Door) {
+                d.phase = 0;
+                d.open = true;
+            }
+            keep.push_back(d);
+        }
+    }
+    objects_ = keep;
     int nextId = 1;
-    for (int i = 0; i < 6; ++i) {
-        Vec2 p = randomFreeSpot();
+    for (auto& o : objects_) {
+        o.id = nextId++;
+    }
+    Vec2 base = spawns_.empty() ? centerOf(cols_ / 2, rows_ / 2) : spawns_[0];
+
+    std::vector<Vec2> freeCells;
+    for (int r = 0; r < rows_; ++r) {
+        for (int c = 0; c < cols_; ++c) {
+            if (grid_[static_cast<size_t>(r) * static_cast<size_t>(cols_) + static_cast<size_t>(c)] != 0) continue;
+            freeCells.push_back(centerOf(c, r));
+        }
+    }
+    std::sort(freeCells.begin(), freeCells.end(), [&](const Vec2& a, const Vec2& b) {
+        return a.distance(base) < b.distance(base);
+    });
+    size_t idx = 0;
+    auto takeCell = [&]() -> Vec2 {
+        if (freeCells.empty()) return base;
+        Vec2 p = freeCells[idx % freeCells.size()];
+        ++idx;
+        return p;
+    };
+
+    for (int i = 0; i < kActiveGenerators; ++i) {
         SimObject o;
         o.id = nextId++;
-        o.type = ObjType::Crate;
-        o.pos = p;
+        o.type = ObjType::Generator;
+        o.pos = takeCell();
         objects_.push_back(o);
     }
     for (int i = 0; i < kFuelCanTotal; ++i) {
         SimObject o;
         o.id = nextId++;
         o.type = ObjType::FuelCan;
-        o.pos = spawns_.empty() ? randomFreeSpot()
-                                : spawns_[static_cast<size_t>(i) % spawns_.size()];
+        o.pos = takeCell();
         objects_.push_back(o);
     }
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < kBatteryTotal; ++i) {
         SimObject o;
         o.id = nextId++;
-        o.type = ObjType::Generator;
-        o.pos = spawns_.empty() ? randomFreeSpot()
-                                : spawns_[static_cast<size_t>(i + 2) % spawns_.size()];
+        o.type = ObjType::Battery;
+        o.pos = takeCell();
         objects_.push_back(o);
     }
-    {
+    for (int i = 0; i < kFileTotal; ++i) {
         SimObject o;
         o.id = nextId++;
-        o.type = ObjType::Vehicle;
-        o.pos = spawns_.empty() ? Vec2{size_ / 2.0, size_ / 2.0} : spawns_[0];
+        o.type = ObjType::File;
+        o.pos = takeCell();
         objects_.push_back(o);
-        vehicleId_ = o.id;
+    }
+    for (int i = 0; i < kMasterLockTotal; ++i) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::MasterLock;
+        o.pos = takeCell();
+        objects_.push_back(o);
+    }
+    for (const auto& t : trapCandidates_) {
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Trap;
+        o.pos = t;
+        objects_.push_back(o);
+    }
+    activeExit_ = 0;
+    if (!exitCandidates_.empty()) {
+        exitCandidates_[0] = base;
     }
 }
 
-bool Sim::generatorsPowered() const {
-    int gens = 0;
-    int need = requiredFuelPerGenerator();
+void Sim::refreshDynamicBlocks() {
+    dynamicGrid_ = grid_;
     for (const auto& o : objects_) {
-        if (o.type != ObjType::Generator) continue;
-        ++gens;
-        if (o.charge < need || o.aux < 1) return false;
+        if (o.type != ObjType::Door) continue;
+        if (o.open && o.phase != 1) continue;
+        int c = cellOf(o.pos.x);
+        int r = cellOf(o.pos.z);
+        if (c < 0 || r < 0 || c >= cols_ || r >= rows_) continue;
+        dynamicGrid_[static_cast<size_t>(r) * static_cast<size_t>(cols_) + static_cast<size_t>(c)] = 1;
     }
-    return gens > 0;
 }
 
-int Sim::requiredFuelPerGenerator() const {
-    int n = static_cast<int>(players_.size());
-    if (n <= 1) return 1;
-    if (n == 2) return 2;
-    if (n == 3) return 3;
-    return kGeneratorFuelNeed;
-}
-
-int Sim::generatorsFueled() const {
-    int count = 0;
-    int need = requiredFuelPerGenerator();
-    for (const auto& o : objects_) {
-        if (o.type == ObjType::Generator && o.charge >= need) ++count;
+bool Sim::hasLineOfSight(const Vec2& a, const Vec2& b) const {
+    const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
+    Vec2 d = b - a;
+    double dist = d.length();
+    int steps = static_cast<int>(dist / 0.5) + 1;
+    for (int i = 1; i < steps; ++i) {
+        double t = static_cast<double>(i) / static_cast<double>(steps);
+        Vec2 p = a + d * t;
+        if (blockedCell(g, cols_, rows_, p.x, p.z)) return false;
     }
-    return count;
-}
-
-int Sim::generatorsBatteries() const {
-    int count = 0;
-    for (const auto& o : objects_) {
-        if (o.type == ObjType::Generator && o.aux >= 1) ++count;
-    }
-    return count;
-}
-
-int Sim::filesFound() const {
-    int count = 0;
-    for (const auto& o : objects_) {
-        if (o.type == ObjType::File && o.taken) ++count;
-    }
-    return count;
-}
-
-int Sim::fuelCansInWorld() const {
-    int count = 0;
-    for (const auto& o : objects_) {
-        if (o.type == ObjType::FuelCan && !o.taken) ++count;
-    }
-    return count;
-}
-
-void Sim::debugTeleportPlayer(int id, double x, double z) {
-    if (id < 0 || id >= static_cast<int>(players_.size())) return;
-    players_[static_cast<size_t>(id)].pos = Vec2{x, z};
-    players_[static_cast<size_t>(id)].prevPos = Vec2{x, z};
-    players_[static_cast<size_t>(id)].lastSpeed = 0.0;
+    return true;
 }
 
 void Sim::addNoise(const Vec2& pos) {
-    noises_.push_back(pos);
+    Noise n;
+    n.pos = pos;
+    n.room = roomIdAt(pos);
+    noises_.push_back(n);
+}
+
+Vec2 Sim::randomFreeSpot() {
+    if (!lootCandidates_.empty()) {
+        return lootCandidates_[actionRng_() % lootCandidates_.size()];
+    }
+    return centerOf(cols_ / 2, rows_ / 2);
+}
+
+int Sim::addPlayer(const std::string& name) {
+    PlayerState p;
+    p.id = static_cast<int>(players_.size());
+    p.name = name.empty() ? ("P" + std::to_string(p.id + 1)) : name;
+    if (!spawns_.empty()) {
+        p.pos = spawns_[static_cast<size_t>(p.id) % spawns_.size()];
+    } else {
+        p.pos = centerOf(cols_ / 2, rows_ / 2);
+    }
+    p.prevPos = p.pos;
+    players_.push_back(p);
+    inputs_.push_back(InputCmd{});
+    prevInteract_.push_back(0);
+    prevHeldInteract_.push_back(0);
+    prevButtons_.push_back(0);
+    return p.id;
+}
+
+void Sim::removePlayer(int id) {
+    if (id < 0 || id >= static_cast<int>(players_.size())) return;
+    players_[static_cast<size_t>(id)].alive = false;
+}
+
+void Sim::setInput(int id, const InputCmd& cmd) {
+    if (id < 0 || id >= static_cast<int>(inputs_.size())) return;
+    inputs_[static_cast<size_t>(id)] = sanitizeInput(cmd);
+}
+
+void Sim::movePlayer(PlayerState& p, const InputCmd& cmd, double dt) {
+    Vec2 forward{std::sin(cmd.yaw), std::cos(cmd.yaw)};
+    p.yaw = cmd.yaw;
+    p.sprinting = cmd.sprint && p.carrying < 0;
+
+    if (p.rootTimer > 0.0) {
+        p.rootTimer -= dt;
+        if (p.carrying >= 0) {
+            for (auto& o : objects_) {
+                if (o.id == p.carrying) {
+                    o.pos = p.pos + forward * 0.9;
+                    o.holder = p.id;
+                }
+            }
+        }
+        return;
+    }
+
+    Vec2 dir{cmd.moveX, cmd.moveZ};
+    if (dir.length() > 1e-6) {
+        dir = dir.normalized();
+        double speed = p.sprinting ? kSprintSpeed : kWalkSpeed;
+        if (p.carrying >= 0) speed *= 0.8;
+        if (p.crouched) speed *= kCrouchSpeedScale;
+        int pc = cellOf(p.pos.x);
+        int pr = cellOf(p.pos.z);
+        if (pc >= 0 && pr >= 0 && pc < cols_ && pr < rows_ &&
+            grass_[static_cast<size_t>(pr) * static_cast<size_t>(cols_) + static_cast<size_t>(pc)] != 0) {
+            speed *= kGrassSpeedMul;
+        }
+        Vec2 before = p.pos;
+        const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
+        moveOnGrid(p.pos, dir, speed, dt, g, cols_, rows_);
+        double maxDist = speed * dt * 1.25 + 0.06;
+        if (p.pos.distance(before) > maxDist) {
+            p.pos = before;
+            ++rejects_;
+        }
+    }
+
+    if (p.carrying >= 0) {
+        for (auto& o : objects_) {
+            if (o.id == p.carrying) {
+                o.pos = p.pos + forward * 0.9;
+                o.holder = p.id;
+            }
+        }
+    }
+}
+
+void Sim::handleInteract(PlayerState& p) {
+    SimObject* best = nullptr;
+    double bestD = p.crouched ? kReachCrouched : kReachStanding;
+    for (auto& o : objects_) {
+        if (o.id == p.carrying) continue;
+        if (o.holder == -2) continue;
+        if (o.type == ObjType::Generator || o.type == ObjType::Vehicle ||
+            o.type == ObjType::WaterTower || o.type == ObjType::Trap) {
+            continue;
+        }
+        if (o.type == ObjType::Pickup && o.taken) continue;
+        if ((o.type == ObjType::FuelCan || o.type == ObjType::Battery ||
+             o.type == ObjType::MasterLock) &&
+            o.taken) {
+            continue;
+        }
+        bool carryable = o.type == ObjType::Crate || o.type == ObjType::FuelCan ||
+                         o.type == ObjType::Battery || o.type == ObjType::MasterLock;
+        if (carryable && o.holder >= 0 && o.holder != p.id) continue;
+        if (carryable && p.carrying >= 0) continue;
+        double d = p.pos.distance(o.pos);
+        if (d < bestD) {
+            bestD = d;
+            best = &o;
+        }
+    }
+
+    if (!best) return;
+
+    if (best->type == ObjType::Door) {
+        if (best->phase == 1) {
+            if (p.carrying >= 0) {
+                SimObject* lockObj = nullptr;
+                for (auto& o : objects_) {
+                    if (o.id == p.carrying && o.type == ObjType::MasterLock) lockObj = &o;
+                }
+                if (lockObj) {
+                    lockObj->taken = true;
+                    lockObj->holder = -1;
+                    p.carrying = -1;
+                    if ((actionRng_() % 100) < 70) {
+                        best->phase = 0;
+                        best->open = true;
+                    }
+                    addNoise(p.pos);
+                }
+            }
+            return;
+        }
+        best->open = !best->open;
+        addNoise(p.pos);
+    } else if (best->type == ObjType::Pickup) {
+        best->taken = true;
+        p.hp = std::min(100.0, p.hp + 40.0);
+        p.ammo += 12;
+        addNoise(p.pos);
+    } else if (best->type == ObjType::File) {
+        best->taken = true;
+        p.files += 1;
+        addNoise(p.pos);
+    } else if (best->type == ObjType::Crate || best->type == ObjType::FuelCan ||
+               best->type == ObjType::Battery || best->type == ObjType::MasterLock) {
+        if (p.carrying < 0) {
+            best->holder = p.id;
+            p.carrying = best->id;
+        } else {
+            for (auto& o : objects_) {
+                if (o.id == p.carrying) o.holder = -1;
+            }
+            p.carrying = -1;
+        }
+        addNoise(p.pos);
+    }
+}
+
+void Sim::handleActions(PlayerState& p, uint8_t pressed, const InputCmd& cmd) {
+    auto dropCarried = [&](double dist) {
+        if (p.carrying < 0) return;
+        Vec2 f{std::sin(cmd.yaw), std::cos(cmd.yaw)};
+        for (auto& o : objects_) {
+            if (o.id != p.carrying) continue;
+            Vec2 place = p.pos;
+            const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
+            for (double d = dist; d >= 0.0; d -= 2.0) {
+                Vec2 cand = p.pos + f * d;
+                if (!blockedCell(g, cols_, rows_, cand.x, cand.z)) {
+                    place = cand;
+                    break;
+                }
+            }
+            o.pos = place;
+            o.holder = -1;
+            addNoise(place);
+        }
+        p.carrying = -1;
+    };
+
+    if (pressed & 0x01) dropCarried(1.2);
+    if (pressed & 0x02) dropCarried(kThrowDistance);
+    if (pressed & 0x04) {
+        if (p.carrying >= 0) {
+            int slot = p.stash0 < 0 ? 0 : (p.stash1 < 0 ? 1 : -1);
+            if (slot == 0) {
+                p.stash0 = p.carrying;
+            } else if (slot == 1) {
+                p.stash1 = p.carrying;
+            }
+            if (slot >= 0) {
+                for (auto& o : objects_) {
+                    if (o.id == p.carrying) o.holder = -2;
+                }
+                p.carrying = -1;
+            }
+        }
+    }
+    if (pressed & 0x08) {
+        if (p.carrying < 0) {
+            int id = p.stash0 >= 0 ? p.stash0 : p.stash1;
+            if (id >= 0) {
+                for (auto& o : objects_) {
+                    if (o.id == id) o.holder = p.id;
+                }
+                p.carrying = id;
+                if (p.stash0 == id) {
+                    p.stash0 = -1;
+                } else {
+                    p.stash1 = -1;
+                }
+            }
+        }
+    }
+    if (pressed & 0x10) {
+        dropCarried(1.2);
+        int stashIds[2] = {p.stash0, p.stash1};
+        for (int id : stashIds) {
+            if (id < 0) continue;
+            for (auto& o : objects_) {
+                if (o.id == id) {
+                    o.holder = -1;
+                    o.pos = p.pos;
+                }
+            }
+            addNoise(p.pos);
+        }
+        p.stash0 = -1;
+        p.stash1 = -1;
+    }
+}
+
+void Sim::updateTraps(double dt) {
+    (void)dt;
+    for (auto& t : objects_) {
+        if (t.type != ObjType::Trap || t.taken) continue;
+        for (auto& p : players_) {
+            if (!p.alive || p.extracted) continue;
+            if (p.pos.distance(t.pos) > kTrapTriggerRange) continue;
+            t.taken = true;
+            p.hp = std::max(1.0, p.hp - kTrapDamage);
+            p.rootTimer = kTrapRootTime;
+            addNoise(p.pos);
+            break;
+        }
+    }
 }
 
 void Sim::updateAnger(double dt) {
@@ -427,21 +905,24 @@ void Sim::updateObjectives(double dt) {
         status_ = -1;
     }
     updateAnger(dt);
+    updateTraps(dt);
 
     int need = requiredFuelPerGenerator();
     if (players_.size() >= 4 && filesRequired_ == 0) {
         filesRequired_ = kFilesForBigTeam;
     }
 
-    if (!helicopterSpawned_ && generatorsPowered() && filesFound() >= filesRequired_) {
-        for (auto& o : objects_) {
-            if (o.type == ObjType::Vehicle) {
-                o.pos = randomFreeSpot();
-                o.phase = 1;
-                addNoise(o.pos);
-                helicopterSpawned_ = true;
-            }
-        }
+    if (!helicopterSpawned_ && generatorsPowered() && filesFound() >= filesRequired_ &&
+        activeExit_ >= 0) {
+        SimObject v;
+        v.id = 9000;
+        v.type = ObjType::Vehicle;
+        v.pos = exitCandidates_[static_cast<size_t>(activeExit_)];
+        v.phase = 1;
+        objects_.push_back(v);
+        vehicleId_ = v.id;
+        helicopterSpawned_ = true;
+        addNoise(v.pos);
     }
 
     for (auto& p : players_) {
@@ -459,7 +940,7 @@ void Sim::updateObjectives(double dt) {
 
         for (auto& g : objects_) {
             if (g.type != ObjType::Generator) continue;
-            if (p.pos.distance(g.pos) > 1.9) continue;
+            if (p.pos.distance(g.pos) > 2.4) continue;
 
             if (g.charge < need && carryType == ObjType::FuelCan) {
                 if (!held) {
@@ -571,29 +1052,63 @@ void Sim::updateObjectives(double dt) {
     }
 }
 
-bool Sim::hasLineOfSight(const Vec2& a, const Vec2& b) const {
-    const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
-    Vec2 d = b - a;
-    double dist = d.length();
-    int steps = static_cast<int>(dist / 0.4) + 1;
-    for (int i = 1; i < steps; ++i) {
-        double t = static_cast<double>(i) / static_cast<double>(steps);
-        Vec2 p = a + d * t;
-        if (blockedCell(g, size_, p.x, p.z)) return false;
+bool Sim::generatorsPowered() const {
+    int gens = 0;
+    int need = requiredFuelPerGenerator();
+    for (const auto& o : objects_) {
+        if (o.type != ObjType::Generator) continue;
+        ++gens;
+        if (o.charge < need || o.aux < 1) return false;
     }
-    return true;
+    return gens >= kActiveGenerators;
 }
 
-Vec2 Sim::randomFreeSpot() {
-    std::uniform_int_distribution<int> dist(2, size_ - 3);
-    for (int tries = 0; tries < 64; ++tries) {
-        int x = dist(rng_);
-        int z = dist(rng_);
-        if (!blockedCell(grid_, size_, x + 0.5, z + 0.5)) {
-            return Vec2{x + 0.5, z + 0.5};
-        }
+int Sim::requiredFuelPerGenerator() const {
+    int n = static_cast<int>(players_.size());
+    if (n <= 1) return 1;
+    if (n == 2) return 2;
+    if (n == 3) return 3;
+    return kGeneratorFuelNeed;
+}
+
+int Sim::generatorsFueled() const {
+    int count = 0;
+    int need = requiredFuelPerGenerator();
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::Generator && o.charge >= need) ++count;
     }
-    return Vec2{size_ / 2.0, size_ / 2.0};
+    return count;
+}
+
+int Sim::generatorsBatteries() const {
+    int count = 0;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::Generator && o.aux >= 1) ++count;
+    }
+    return count;
+}
+
+int Sim::filesFound() const {
+    int count = 0;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::File && o.taken) ++count;
+    }
+    return count;
+}
+
+int Sim::fuelCansInWorld() const {
+    int count = 0;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::FuelCan && !o.taken) ++count;
+    }
+    return count;
+}
+
+void Sim::debugTeleportPlayer(int id, double x, double z) {
+    if (id < 0 || id >= static_cast<int>(players_.size())) return;
+    players_[static_cast<size_t>(id)].pos = Vec2{x, z};
+    players_[static_cast<size_t>(id)].prevPos = Vec2{x, z};
+    players_[static_cast<size_t>(id)].lastSpeed = 0.0;
 }
 
 void Sim::updateMonsters(double dt) {
@@ -614,7 +1129,12 @@ void Sim::updateMonsters(double dt) {
             Vec2 f{std::sin(m.yaw), std::cos(m.yaw)};
             double dot = dir.x * f.x + dir.z * f.z;
             bool inFov = close || dot > 0.819;
-            if (inFov && hasLineOfSight(m.pos, p.pos)) {
+            if (!inFov) continue;
+            if (grass_[static_cast<size_t>(cellOf(p.pos.z)) * static_cast<size_t>(cols_) +
+                       static_cast<size_t>(cellOf(p.pos.x))] != 0) {
+                if (dist > sight * kGrassExposureMul) continue;
+            }
+            if (hasLineOfSight(m.pos, p.pos)) {
                 seen = p.id;
                 seenPos = p.pos;
                 break;
@@ -638,9 +1158,13 @@ void Sim::updateMonsters(double dt) {
 
         for (const auto& noise : noises_) {
             if (m.state == 1) break;
-            if (m.pos.distance(noise) <= 28.0) {
+            double d = m.pos.distance(noise.pos);
+            if (noise.room >= 0 && noise.room != roomIdAt(m.pos)) {
+                d *= 1.6;
+            }
+            if (d <= 28.0) {
                 m.state = 2;
-                m.lastSeen = noise;
+                m.lastSeen = noise.pos;
                 m.searchTimer = 6.0;
                 m.anger = std::min(100, m.anger + 8);
                 break;
@@ -654,286 +1178,54 @@ void Sim::updateMonsters(double dt) {
         } else if (m.state == 2) {
             goal = m.lastSeen;
             m.searchTimer -= dt;
-            if (m.searchTimer <= 0.0 || m.pos.distance(m.lastSeen) < 0.6) {
+            if (m.searchTimer <= 0.0 || m.pos.distance(m.lastSeen) < 0.8) {
                 m.state = 0;
                 m.patrolTarget = randomFreeSpot();
                 m.patrolTimer = 0.0;
             }
         }
 
-        Vec2 to = goal - m.pos;
-        double dist = to.length();
         double baseSpeed = (m.state == 1) ? kMonsterSpeedChase : kMonsterSpeedPatrol;
         double speed = baseSpeed * speedScale;
-        if (dist > 0.08) {
-            Vec2 dir = to.normalized();
-            m.yaw = std::atan2(dir.x, dir.z);
-            moveOnGrid(m.pos, dir, speed, dt, g, size_);
+
+        m.repathTimer -= dt;
+        if (m.repathTimer <= 0.0 || m.path.empty()) {
+            m.repathTimer = (m.state == 1) ? 0.4 : 1.2;
+            m.path = findPath(m.pos, goal);
+            m.pathIndex = 0;
+        }
+        if (!m.path.empty() && m.pathIndex < m.path.size()) {
+            Vec2 wp = m.path[m.pathIndex];
+            if (m.pos.distance(wp) < 0.7) {
+                ++m.pathIndex;
+                if (m.pathIndex < m.path.size()) wp = m.path[m.pathIndex];
+            }
+            Vec2 to = wp - m.pos;
+            double dist = to.length();
+            if (dist > 0.05) {
+                Vec2 dir = to.normalized();
+                m.yaw = std::atan2(dir.x, dir.z);
+                moveOnGrid(m.pos, dir, speed, dt, g, cols_, rows_);
+            }
+        } else {
+            Vec2 to = goal - m.pos;
+            double dist = to.length();
+            if (dist > 0.05) {
+                Vec2 dir = to.normalized();
+                m.yaw = std::atan2(dir.x, dir.z);
+                moveOnGrid(m.pos, dir, speed, dt, g, cols_, rows_);
+            }
         }
         if (m.state == 0) {
             m.patrolTimer += dt;
-            if (dist < 0.6 || m.patrolTimer > 8.0) {
+            if (m.pos.distance(m.patrolTarget) < 0.8 || m.patrolTimer > 8.0) {
                 m.patrolTarget = randomFreeSpot();
                 m.patrolTimer = 0.0;
+                m.path.clear();
             }
         }
     }
     noises_.clear();
-}
-
-void Sim::refreshDynamicBlocks() {
-    dynamicGrid_ = grid_;
-    for (const auto& o : objects_) {
-        if (o.type != ObjType::Door || o.open) continue;
-        int gx = static_cast<int>(std::floor(o.pos.x));
-        int gz = static_cast<int>(std::floor(o.pos.z));
-        if (gx < 0 || gz < 0 || gx >= size_ || gz >= size_) continue;
-        dynamicGrid_[static_cast<size_t>(gz) * static_cast<size_t>(size_) + static_cast<size_t>(gx)] = 1;
-    }
-}
-
-bool Sim::blockedCell(const std::vector<unsigned char>& grid, int size, double x, double z) {
-    int gx = static_cast<int>(std::floor(x));
-    int gz = static_cast<int>(std::floor(z));
-    if (gx < 0 || gz < 0 || gx >= size || gz >= size) return true;
-    return grid[static_cast<size_t>(gz) * static_cast<size_t>(size) + static_cast<size_t>(gx)] != 0;
-}
-
-void Sim::moveOnGrid(Vec2& pos, const Vec2& dir, double speed, double dt,
-                     const std::vector<unsigned char>& grid, int size) {
-    double r = kPlayerRadius;
-    auto freeAt = [&](double x, double z) {
-        return !blockedCell(grid, size, x - r, z - r) && !blockedCell(grid, size, x + r, z - r) &&
-               !blockedCell(grid, size, x - r, z + r) && !blockedCell(grid, size, x + r, z + r);
-    };
-
-    double nx = pos.x + dir.x * speed * dt;
-    if (freeAt(nx, pos.z)) pos.x = nx;
-    double nz = pos.z + dir.z * speed * dt;
-    if (freeAt(pos.x, nz)) pos.z = nz;
-}
-
-bool Sim::blocked(int x, int z) const {
-    if (x < 0 || z < 0 || x >= size_ || z >= size_) return true;
-    return grid_[static_cast<size_t>(z) * static_cast<size_t>(size_) + static_cast<size_t>(x)] != 0;
-}
-
-bool Sim::blockedAt(const Vec2& p) const {
-    return blocked(static_cast<int>(std::floor(p.x)), static_cast<int>(std::floor(p.z)));
-}
-
-bool Sim::blockedOnAxis(double x, double z) const {
-    const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
-    double r = kPlayerRadius;
-    auto hit = [&](double px, double pz) {
-        return blockedCell(g, size_, px, pz);
-    };
-    return hit(x - r, z - r) || hit(x + r, z - r) || hit(x - r, z + r) || hit(x + r, z + r);
-}
-
-int Sim::addPlayer(const std::string& name) {
-    PlayerState p;
-    p.id = static_cast<int>(players_.size());
-    p.name = name.empty() ? ("P" + std::to_string(p.id + 1)) : name;
-    if (!spawns_.empty()) {
-        p.pos = spawns_[static_cast<size_t>(p.id) % spawns_.size()];
-    } else {
-        p.pos = Vec2{size_ / 2.0, size_ / 2.0};
-    }
-    p.prevPos = p.pos;
-    players_.push_back(p);
-    inputs_.push_back(InputCmd{});
-    prevInteract_.push_back(0);
-    prevHeldInteract_.push_back(0);
-    prevButtons_.push_back(0);
-    return p.id;
-}
-
-void Sim::removePlayer(int id) {
-    if (id < 0 || id >= static_cast<int>(players_.size())) return;
-    players_[static_cast<size_t>(id)].alive = false;
-}
-
-void Sim::setInput(int id, const InputCmd& cmd) {
-    if (id < 0 || id >= static_cast<int>(inputs_.size())) return;
-    inputs_[static_cast<size_t>(id)] = sanitizeInput(cmd);
-}
-
-void Sim::movePlayer(PlayerState& p, const InputCmd& cmd, double dt) {
-    Vec2 forward{std::sin(cmd.yaw), std::cos(cmd.yaw)};
-    p.yaw = cmd.yaw;
-    p.sprinting = cmd.sprint && p.carrying < 0;
-
-    Vec2 dir{cmd.moveX, cmd.moveZ};
-    if (dir.length() > 1e-6) {
-        dir = dir.normalized();
-        double speed = p.sprinting ? kSprintSpeed : kWalkSpeed;
-        if (p.carrying >= 0) speed *= 0.8;
-        if (p.crouched) speed *= kCrouchSpeedScale;
-        Vec2 before = p.pos;
-        moveOnGrid(p.pos, dir, speed, dt, dynamicGrid_.empty() ? grid_ : dynamicGrid_, size_);
-        double maxDist = speed * dt * 1.25 + 0.06;
-        if (p.pos.distance(before) > maxDist) {
-            p.pos = before;
-            ++rejects_;
-        }
-    }
-
-    if (p.carrying >= 0) {
-        for (auto& o : objects_) {
-            if (o.id == p.carrying) {
-                o.pos = p.pos + forward * 0.9;
-                o.holder = p.id;
-            }
-        }
-    }
-}
-
-void Sim::handleInteract(PlayerState& p) {
-    SimObject* best = nullptr;
-    double bestD = p.crouched ? kReachCrouched : kReachStanding;
-    for (auto& o : objects_) {
-        if (o.id == p.carrying) continue;
-        if (o.holder == -2) continue;
-        if (o.type == ObjType::Generator || o.type == ObjType::Vehicle) continue;
-        if (o.type == ObjType::Pickup && o.taken) continue;
-        if ((o.type == ObjType::FuelCan || o.type == ObjType::Battery ||
-             o.type == ObjType::MasterLock) &&
-            o.taken) {
-            continue;
-        }
-        bool carryable = o.type == ObjType::Crate || o.type == ObjType::FuelCan ||
-                         o.type == ObjType::Battery || o.type == ObjType::MasterLock;
-        if (carryable && o.holder >= 0 && o.holder != p.id) continue;
-        if (carryable && p.carrying >= 0) continue;
-        double d = p.pos.distance(o.pos);
-        if (d < bestD) {
-            bestD = d;
-            best = &o;
-        }
-    }
-
-    if (!best) {
-        return;
-    }
-
-    if (best->type == ObjType::Door) {
-        if (best->phase == 1) {
-            if (p.carrying >= 0) {
-                SimObject* lockObj = nullptr;
-                for (auto& o : objects_) {
-                    if (o.id == p.carrying && o.type == ObjType::MasterLock) lockObj = &o;
-                }
-                if (lockObj) {
-                    lockObj->taken = true;
-                    lockObj->holder = -1;
-                    p.carrying = -1;
-                    if ((actionRng_() % 100) < 70) {
-                        best->phase = 0;
-                        best->open = true;
-                    }
-                    addNoise(p.pos);
-                }
-            }
-            return;
-        }
-        best->open = !best->open;
-        addNoise(p.pos);
-    } else if (best->type == ObjType::Pickup) {
-        best->taken = true;
-        p.hp = std::min(100.0, p.hp + 40.0);
-        p.ammo += 12;
-        addNoise(p.pos);
-    } else if (best->type == ObjType::File) {
-        best->taken = true;
-        p.files += 1;
-        addNoise(p.pos);
-    } else if (best->type == ObjType::Crate || best->type == ObjType::FuelCan ||
-               best->type == ObjType::Battery || best->type == ObjType::MasterLock) {
-        if (p.carrying < 0) {
-            best->holder = p.id;
-            p.carrying = best->id;
-        } else {
-            for (auto& o : objects_) {
-                if (o.id == p.carrying) o.holder = -1;
-            }
-            p.carrying = -1;
-        }
-        addNoise(p.pos);
-    }
-}
-
-void Sim::handleActions(PlayerState& p, uint8_t pressed, const InputCmd& cmd) {
-    auto dropCarried = [&](double dist) {
-        if (p.carrying < 0) return;
-        Vec2 f{std::sin(cmd.yaw), std::cos(cmd.yaw)};
-        for (auto& o : objects_) {
-            if (o.id != p.carrying) continue;
-            Vec2 place = p.pos;
-            for (double d = dist; d >= 0.0; d -= 2.0) {
-                Vec2 cand = p.pos + f * d;
-                if (!blockedCell(grid_, size_, cand.x, cand.z)) {
-                    place = cand;
-                    break;
-                }
-            }
-            o.pos = place;
-            o.holder = -1;
-            addNoise(place);
-        }
-        p.carrying = -1;
-    };
-
-    if (pressed & 0x01) dropCarried(1.2);
-    if (pressed & 0x02) dropCarried(kThrowDistance);
-    if (pressed & 0x04) {
-        if (p.carrying >= 0) {
-            int slot = p.stash0 < 0 ? 0 : (p.stash1 < 0 ? 1 : -1);
-            if (slot == 0) {
-                p.stash0 = p.carrying;
-            } else if (slot == 1) {
-                p.stash1 = p.carrying;
-            }
-            if (slot >= 0) {
-                for (auto& o : objects_) {
-                    if (o.id == p.carrying) o.holder = -2;
-                }
-                p.carrying = -1;
-            }
-        }
-    }
-    if (pressed & 0x08) {
-        if (p.carrying < 0) {
-            int id = p.stash0 >= 0 ? p.stash0 : p.stash1;
-            if (id >= 0) {
-                for (auto& o : objects_) {
-                    if (o.id == id) o.holder = p.id;
-                }
-                p.carrying = id;
-                if (p.stash0 == id) {
-                    p.stash0 = -1;
-                } else {
-                    p.stash1 = -1;
-                }
-            }
-        }
-    }
-    if (pressed & 0x10) {
-        dropCarried(1.2);
-        int stashIds[2] = {p.stash0, p.stash1};
-        for (int id : stashIds) {
-            if (id < 0) continue;
-            for (auto& o : objects_) {
-                if (o.id == id) {
-                    o.holder = -1;
-                    o.pos = p.pos;
-                }
-            }
-            addNoise(p.pos);
-        }
-        p.stash0 = -1;
-        p.stash1 = -1;
-    }
 }
 
 void Sim::step(double dt) {

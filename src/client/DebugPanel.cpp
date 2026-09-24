@@ -17,7 +17,8 @@ void drawPanel(const ClientDebugState& state, bool& open) {
                     static_cast<double>(state.recvBytes) / 1024.0);
         ImGui::Text("player id %d   remotes %d", state.playerId, state.remoteCount);
         ImGui::Separator();
-        ImGui::Text("Map seed %u  size %d  blocks %d", state.seed, state.mapSize, state.blockCount);
+        ImGui::Text("Map seed %u  %dx%d  cell %.1fm  blocks %d", state.seed, state.mapCols,
+                    state.mapRows, state.cellSize, state.blockCount);
         ImGui::Text("objects %d   hp %.0f   carrying %d   gamepad %s", state.objectCount, state.hp,
                     state.carrying, state.padActive ? "on" : "off");
         ImGui::Text("monsters %d   state %s   pos %.1f, %.1f", state.monsterCount,

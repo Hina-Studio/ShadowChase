@@ -34,7 +34,9 @@ struct ClientDebugState {
     int recvPackets = 0;
     long long recvBytes = 0;
     unsigned int seed = 0;
-    int mapSize = 0;
+    int mapCols = 0;
+    int mapRows = 0;
+    float cellSize = 2.0f;
     int blockCount = 0;
     int objectCount = 0;
     int monsterCount = 0;
@@ -85,7 +87,9 @@ private:
     std::vector<sc::Block> blocks_;
     std::vector<unsigned char> grid_;
     std::vector<unsigned char> dynGrid_;
-    int mapSize_ = 0;
+    int mapCols_ = 0;
+    int mapRows_ = 0;
+    float cell_ = 2.0f;
     unsigned int seed_ = 0;
     int playerId_ = -1;
     sc::Vec2 predicted_;

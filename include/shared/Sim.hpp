@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "shared/MapData.hpp"
 #include "shared/Math.hpp"
 
 namespace sc {
@@ -21,6 +22,8 @@ enum class ObjType : uint8_t {
     Battery = 7,
     File = 8,
     MasterLock = 9,
+    Trap = 10,
+    WaterTower = 11,
 };
 
 struct SimObject {
@@ -56,6 +59,7 @@ struct PlayerState {
     bool crouched = false;
     int stash0 = -1;
     int stash1 = -1;
+    double rootTimer = 0.0;
 };
 
 struct MonsterState {
@@ -70,6 +74,9 @@ struct MonsterState {
     double patrolTimer = 0.0;
     int anger = 0;
     double searchTimer = 0.0;
+    std::vector<Vec2> path;
+    size_t pathIndex = 0;
+    double repathTimer = 0.0;
 };
 
 constexpr double kMonsterSpeedPatrol = 2.0;
@@ -98,6 +105,11 @@ constexpr double kReachStanding = 1.6;
 constexpr double kReachCrouched = 2.0;
 constexpr double kCrouchSpeedScale = 0.6;
 
+struct Noise {
+    Vec2 pos;
+    int room = -1;
+};
+
 struct InputCmd {
     double moveX = 0.0;
     double moveZ = 0.0;
@@ -121,7 +133,7 @@ InputCmd sanitizeInput(const InputCmd& in);
 
 class Sim {
 public:
-    void generate(unsigned int seed, int size);
+    void generate(unsigned int seed);
     int addPlayer(const std::string& name);
     void removePlayer(int id);
     void setInput(int id, const InputCmd& cmd);
@@ -132,7 +144,11 @@ public:
     const std::vector<SimObject>& objects() const { return objects_; }
     const std::vector<MonsterState>& monsters() const { return monsters_; }
     const std::vector<Vec2>& spawns() const { return spawns_; }
-    int size() const { return size_; }
+    int size() const { return cols_ * rows_; }
+    int cols() const { return cols_; }
+    int rows() const { return rows_; }
+    double cellSize() const { return kCellSize; }
+    int roomIdAt(const Vec2& p) const;
     unsigned int seed() const { return seed_; }
     unsigned int tick() const { return tick_; }
     int rejects() const { return rejects_; }
@@ -152,9 +168,10 @@ public:
     bool blocked(int x, int z) const;
     bool blockedAt(const Vec2& p) const;
 
-    static bool blockedCell(const std::vector<unsigned char>& grid, int size, double x, double z);
+    static bool blockedCell(const std::vector<unsigned char>& grid, int cols, int rows, double x,
+                            double z);
     static void moveOnGrid(Vec2& pos, const Vec2& dir, double speed, double dt,
-                           const std::vector<unsigned char>& grid, int size);
+                           const std::vector<unsigned char>& grid, int cols, int rows);
 
 private:
     void movePlayer(PlayerState& p, const InputCmd& cmd, double dt);
@@ -170,11 +187,16 @@ private:
     bool reachableFrom(const Vec2& start, const Vec2& goal,
                        const std::vector<unsigned char>& grid) const;
     void applyFallback();
+    void buildRooms();
+    bool passableCell(int c, int r) const;
+    std::vector<Vec2> findPath(const Vec2& from, const Vec2& to) const;
+    void updateTraps(double dt);
     bool hasLineOfSight(const Vec2& a, const Vec2& b) const;
     Vec2 randomFreeSpot();
     bool blockedOnAxis(double x, double z) const;
 
-    int size_ = 48;
+    int cols_ = 36;
+    int rows_ = 26;
     unsigned int seed_ = 0;
     unsigned int tick_ = 0;
     int rejects_ = 0;
@@ -188,13 +210,21 @@ private:
     std::mt19937 actionRng_;
     std::vector<unsigned char> grid_;
     std::vector<unsigned char> dynamicGrid_;
+    std::vector<unsigned char> grass_;
+    std::vector<int> room_;
+    std::vector<Vec2> genCandidates_;
+    std::vector<Vec2> lootCandidates_;
+    std::vector<Vec2> trapCandidates_;
+    std::vector<Vec2> exitCandidates_;
+    std::vector<Vec2> spawnCandidates_;
+    int activeExit_ = -1;
     std::vector<SimObject> objects_;
     std::vector<MonsterState> monsters_;
     std::mt19937 rng_;
     int status_ = 0;
     int vehicleId_ = -1;
     std::string layoutReason_ = "ok";
-    std::vector<Vec2> noises_;
+    std::vector<Noise> noises_;
     double matchTime_ = 0.0;
     bool rageActive_ = false;
     int filesRequired_ = 0;

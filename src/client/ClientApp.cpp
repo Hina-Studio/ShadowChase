@@ -94,8 +94,8 @@ void ClientApp::rebuildDynamicGrid() {
         if ((o.flags & 0x01) != 0) continue;
         int gx = static_cast<int>(std::floor(o.x));
         int gz = static_cast<int>(std::floor(o.z));
-        if (gx < 0 || gz < 0 || gx >= mapSize_ || gz >= mapSize_) continue;
-        dynGrid_[static_cast<size_t>(gz) * static_cast<size_t>(mapSize_) + static_cast<size_t>(gx)] = 1;
+        if (gx < 0 || gz < 0 || gx >= mapCols_ || gz >= mapRows_) continue;
+        dynGrid_[static_cast<size_t>(gz) * static_cast<size_t>(mapCols_) + static_cast<size_t>(gx)] = 1;
     }
 }
 
@@ -124,12 +124,14 @@ void ClientApp::handleEvents() {
                 if (sc::decodeWelcome(event.packet->data, event.packet->dataLength, welcome)) {
                     blocks_ = welcome.blocks;
                     seed_ = welcome.seed;
-                    mapSize_ = welcome.mapSize;
+                    mapCols_ = welcome.mapCols;
+                    mapRows_ = welcome.mapRows;
+                    cell_ = welcome.cellSize > 0.1f ? welcome.cellSize : 2.0f;
                     playerId_ = welcome.playerId;
-                    grid_.assign(static_cast<size_t>(mapSize_) * static_cast<size_t>(mapSize_), 0);
+                    grid_.assign(static_cast<size_t>(mapCols_) * static_cast<size_t>(mapRows_), 0);
                     for (const auto& b : blocks_) {
-                        if (b.x >= 0 && b.z >= 0 && b.x < mapSize_ && b.z < mapSize_) {
-                            grid_[static_cast<size_t>(b.z) * static_cast<size_t>(mapSize_) +
+                        if (b.x >= 0 && b.z >= 0 && b.x < mapCols_ && b.z < mapRows_) {
+                            grid_[static_cast<size_t>(b.z) * static_cast<size_t>(mapCols_) +
                                   static_cast<size_t>(b.x)] = 1;
                         }
                     }
@@ -147,7 +149,7 @@ void ClientApp::handleEvents() {
                         netObjects_[o.id] = so;
                     }
                     rebuildDynamicGrid();
-                    predicted_ = sc::Vec2{mapSize_ / 2.0, mapSize_ / 2.0};
+                    predicted_ = sc::Vec2{mapCols_ * cell_ / 2.0, mapRows_ * cell_ / 2.0};
                     core::Logger::info("[CLIENT] welcome id=" + std::to_string(playerId_) +
                                        " room=" + std::to_string(welcome.roomCode) + " seed=" +
                                        std::to_string(seed_) + " blocks=" +
@@ -325,7 +327,7 @@ void ClientApp::updateLocal(double dt) {
     if (carrying) speed *= 0.8;
     if (crouch) speed *= sc::kCrouchSpeedScale;
     sc::Sim::moveOnGrid(predicted_, sc::Vec2{clean.moveX, clean.moveZ}.normalized(), speed, dt,
-                        useGrid, mapSize_);
+                        useGrid, mapCols_, mapRows_);
 }
 
 std::string ClientApp::interactionPrompt() const {
@@ -448,7 +450,8 @@ std::string ClientApp::interactionPrompt() const {
 }
 
 void ClientApp::render() {
-    double half = mapSize_ > 0 ? mapSize_ / 2.0 : 24.0;
+    double worldW = mapCols_ > 0 ? mapCols_ * cell_ : 48.0;
+    double worldH = mapRows_ > 0 ? mapRows_ * cell_ : 48.0;
     Vector3 eye{static_cast<float>(predicted_.x), 1.65f, static_cast<float>(predicted_.z)};
     float cp = static_cast<float>(std::cos(pitch_));
     Vector3 fwd{static_cast<float>(std::sin(yaw_)) * cp, static_cast<float>(std::sin(pitch_)),
@@ -465,14 +468,27 @@ void ClientApp::render() {
     cam.projection = CAMERA_PERSPECTIVE;
 
     BeginMode3D(cam);
-    DrawPlane(Vector3{static_cast<float>(half), 0.0f, static_cast<float>(half)},
-              Vector2{static_cast<float>(mapSize_), static_cast<float>(mapSize_)},
+    DrawPlane(Vector3{static_cast<float>(worldW / 2.0), 0.0f, static_cast<float>(worldH / 2.0)},
+              Vector2{static_cast<float>(worldW), static_cast<float>(worldH)},
               Color{28, 28, 34, 255});
-    DrawGrid(mapSize_, 1.0f);
+    for (int gc = 0; gc <= mapCols_; ++gc) {
+        DrawLine3D(Vector3{static_cast<float>(gc * cell_), 0.01f, 0.0f},
+                   Vector3{static_cast<float>(gc * cell_), 0.01f, static_cast<float>(worldH)},
+                   Color{44, 44, 56, 255});
+    }
+    for (int gr = 0; gr <= mapRows_; ++gr) {
+        DrawLine3D(Vector3{0.0f, 0.01f, static_cast<float>(gr * cell_)},
+                   Vector3{static_cast<float>(worldW), 0.01f, static_cast<float>(gr * cell_)},
+                   Color{44, 44, 56, 255});
+    }
     for (const auto& b : blocks_) {
-        Vector3 c{static_cast<float>(b.x) + 0.5f, 1.5f, static_cast<float>(b.z) + 0.5f};
-        DrawCube(c, 1.0f, 3.0f, 1.0f, Color{140, 105, 70, 255});
-        DrawCubeWires(c, 1.0f, 3.0f, 1.0f, Color{80, 60, 40, 255});
+        Vector3 c{static_cast<float>(b.x * cell_ + cell_ / 2.0),
+                  static_cast<float>(sc::kWallHeight / 2.0),
+                  static_cast<float>(b.z * cell_ + cell_ / 2.0)};
+        DrawCube(c, static_cast<float>(cell_), static_cast<float>(sc::kWallHeight),
+                 static_cast<float>(cell_), Color{140, 105, 70, 255});
+        DrawCubeWires(c, static_cast<float>(cell_), static_cast<float>(sc::kWallHeight),
+                      static_cast<float>(cell_), Color{80, 60, 40, 255});
     }
 
     for (const auto& kv : netObjects_) {
@@ -523,6 +539,16 @@ void ClientApp::render() {
                 DrawCircle3D(Vector3{o.x, 0.05f, o.z}, 3.0f, Vector3{1.0f, 0.0f, 0.0f}, 90.0f,
                              Color{90, 230, 120, 180});
             }
+        } else if (type == static_cast<uint8_t>(sc::ObjType::Trap)) {
+            if ((o.flags & 0x02) != 0) continue;
+            DrawCylinder(Vector3{o.x, 0.03f, o.z}, 0.35f, 0.35f, 0.06f, 12,
+                         Color{150, 40, 40, 255});
+            DrawCylinderWires(Vector3{o.x, 0.03f, o.z}, 0.35f, 0.35f, 0.06f, 12,
+                              Color{60, 20, 20, 255});
+        } else if (type == static_cast<uint8_t>(sc::ObjType::WaterTower)) {
+            DrawCylinder(Vector3{o.x, 2.0f, o.z}, 1.3f, 1.6f, 4.0f, 16, Color{120, 130, 150, 255});
+            DrawCylinderWires(Vector3{o.x, 2.0f, o.z}, 1.3f, 1.6f, 4.0f, 16,
+                              Color{70, 78, 92, 255});
         }
     }
 
@@ -556,7 +582,9 @@ void ClientApp::render() {
     dbg_.playerId = playerId_;
     dbg_.remoteCount = static_cast<int>(netPlayers_.size()) - (playerId_ >= 0 ? 1 : 0);
     dbg_.seed = seed_;
-    dbg_.mapSize = mapSize_;
+    dbg_.mapCols = mapCols_;
+    dbg_.mapRows = mapRows_;
+    dbg_.cellSize = cell_;
     dbg_.blockCount = static_cast<int>(blocks_.size());
     dbg_.objectCount = static_cast<int>(netObjects_.size());
     dbg_.monsterCount = static_cast<int>(netMonsters_.size());

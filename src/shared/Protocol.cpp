@@ -136,7 +136,9 @@ std::vector<uint8_t> encodeWelcome(const WelcomeData& welcome) {
     w.u32(welcome.roomCode);
     w.u16(static_cast<uint16_t>(welcome.playerId));
     w.u32(static_cast<uint32_t>(welcome.seed));
-    w.u16(static_cast<uint16_t>(welcome.mapSize));
+    w.u16(static_cast<uint16_t>(welcome.mapCols));
+    w.u16(static_cast<uint16_t>(welcome.mapRows));
+    w.f32(welcome.cellSize);
     w.str(welcome.version);
     w.u16(static_cast<uint16_t>(welcome.blocks.size()));
     for (const auto& b : welcome.blocks) {
@@ -167,15 +169,22 @@ bool decodeWelcome(const uint8_t* data, size_t size, WelcomeData& welcome) {
     uint32_t roomCode = 0;
     uint16_t pid = 0;
     uint32_t seed = 0;
-    uint16_t mapSize = 0;
+    uint16_t mapCols = 0;
+    uint16_t mapRows = 0;
+    float cellSize = 2.0f;
     if (!r.u8(type) || type != static_cast<uint8_t>(MsgType::Welcome)) return false;
-    if (!r.u32(roomCode) || !r.u16(pid) || !r.u32(seed) || !r.u16(mapSize)) return false;
+    if (!r.u32(roomCode) || !r.u16(pid) || !r.u32(seed) || !r.u16(mapCols) || !r.u16(mapRows) ||
+        !r.f32(cellSize)) {
+        return false;
+    }
     if (!r.str(welcome.version)) return false;
 
     welcome.roomCode = roomCode;
     welcome.playerId = pid;
     welcome.seed = seed;
-    welcome.mapSize = mapSize;
+    welcome.mapCols = mapCols;
+    welcome.mapRows = mapRows;
+    welcome.cellSize = cellSize;
 
     uint16_t blockCount = 0;
     if (!r.u16(blockCount)) return false;
