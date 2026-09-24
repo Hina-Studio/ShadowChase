@@ -361,9 +361,11 @@ void Sim::placeQuestObjects() {
         if (o.type == ObjType::WaterTower) towers.push_back(o);
     }
     objects_.clear();
+    int nextId = 1;
     for (auto& d : doors) {
         d.open = true;
         d.phase = ((actionRng_() % 100) < 25) ? 1 : 0;
+        d.id = nextId++;
         objects_.push_back(d);
     }
     for (int r = 0; r < rows_; ++r) {
@@ -371,9 +373,9 @@ void Sim::placeQuestObjects() {
             const std::string& line = maloneFarmMap()[static_cast<size_t>(r)];
             if (c < static_cast<int>(line.size()) && line[static_cast<size_t>(c)] == 'W') {
                 SimObject w;
-                w.id = 0;
                 w.type = ObjType::WaterTower;
                 w.pos = centerOf(c, r);
+                w.id = nextId++;
                 objects_.push_back(w);
             }
         }
@@ -398,7 +400,6 @@ void Sim::placeQuestObjects() {
         activeExit_ = static_cast<int>(actionRng_() % exitCandidates_.size());
     }
 
-    int nextId = 1;
     for (const auto& g : gens) {
         SimObject o;
         o.id = nextId++;

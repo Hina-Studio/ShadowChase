@@ -211,6 +211,8 @@ private:
                 welcome.objects.push_back(wo);
             }
             auto payload = sc::encodeWelcome(welcome);
+            core::Logger::info("[SERVER] welcome objects=" + std::to_string(welcome.objects.size()) +
+                               " blocks=" + std::to_string(welcome.blocks.size()));
             ENetPacket* packet = enet_packet_create(payload.data(), payload.size(),
                                                     ENET_PACKET_FLAG_RELIABLE);
             enet_peer_send(peer, kChannelControl, packet);
