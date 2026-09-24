@@ -82,6 +82,13 @@ void Sim::generate(unsigned int seed, int size) {
 
     dynamicGrid_ = grid_;
     rng_.seed(seed ^ 0x5F3759DFu);
+    actionRng_.seed(seed ^ 0x00C0FFEEu);
+    matchTime_ = 0.0;
+    rageActive_ = false;
+    filesRequired_ = 0;
+    helicopterSpawned_ = false;
+    noises_.clear();
+    status_ = 0;
 
     bool valid = false;
     std::string reason;
@@ -128,6 +135,9 @@ void Sim::placeQuestObjects() {
         o.id = nextId++;
         o.type = ObjType::Door;
         o.pos = p;
+        if ((actionRng_() % 100) < 40) {
+            o.phase = 1;
+        }
         objects_.push_back(o);
     }
     for (int i = 0; i < 6; ++i) {
@@ -154,7 +164,31 @@ void Sim::placeQuestObjects() {
         o.pos = p;
         objects_.push_back(o);
     }
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < kBatteryTotal; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::Battery;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kFileTotal; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::File;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kMasterLockTotal; ++i) {
+        Vec2 p = randomFreeSpot();
+        SimObject o;
+        o.id = nextId++;
+        o.type = ObjType::MasterLock;
+        o.pos = p;
+        objects_.push_back(o);
+    }
+    for (int i = 0; i < kGeneratorCount; ++i) {
         Vec2 p = randomFreeSpot();
         SimObject o;
         o.id = nextId++;
@@ -210,9 +244,24 @@ bool Sim::reachableFrom(const Vec2& start, const Vec2& goal,
 }
 
 bool Sim::validateLayout(std::string& reason) const {
-    int required = kGeneratorFuelNeed * 2 + kVehicleFuelNeed;
+    int required = kGeneratorFuelNeed * kGeneratorCount;
     if (fuelCansInWorld() < (required * 13) / 10 + 1) {
         reason = "fuel redundancy below 1.3x";
+        return false;
+    }
+    int batteries = 0;
+    int files = 0;
+    for (const auto& o : objects_) {
+        if (o.taken) continue;
+        if (o.type == ObjType::Battery) ++batteries;
+        if (o.type == ObjType::File) ++files;
+    }
+    if (batteries < (kGeneratorCount * 13) / 10 + 1) {
+        reason = "battery redundancy below 1.3x";
+        return false;
+    }
+    if (files < kFilesForBigTeam) {
+        reason = "not enough files";
         return false;
     }
 
@@ -240,7 +289,10 @@ bool Sim::validateLayout(std::string& reason) const {
         }
     }
     for (const auto& o : objects_) {
-        if (o.type != ObjType::Generator && o.type != ObjType::FuelCan) continue;
+        if (o.type != ObjType::Generator && o.type != ObjType::FuelCan &&
+            o.type != ObjType::Battery && o.type != ObjType::File) {
+            continue;
+        }
         bool anySpawn = false;
         for (const auto& s : spawns_) {
             if (reachableFrom(s, o.pos, passable)) {
@@ -297,12 +349,46 @@ void Sim::applyFallback() {
 
 bool Sim::generatorsPowered() const {
     int gens = 0;
+    int need = requiredFuelPerGenerator();
     for (const auto& o : objects_) {
         if (o.type != ObjType::Generator) continue;
         ++gens;
-        if (o.charge < kGeneratorFuelNeed) return false;
+        if (o.charge < need || o.aux < 1) return false;
     }
     return gens > 0;
+}
+
+int Sim::requiredFuelPerGenerator() const {
+    int n = static_cast<int>(players_.size());
+    if (n <= 1) return 1;
+    if (n == 2) return 2;
+    if (n == 3) return 3;
+    return kGeneratorFuelNeed;
+}
+
+int Sim::generatorsFueled() const {
+    int count = 0;
+    int need = requiredFuelPerGenerator();
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::Generator && o.charge >= need) ++count;
+    }
+    return count;
+}
+
+int Sim::generatorsBatteries() const {
+    int count = 0;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::Generator && o.aux >= 1) ++count;
+    }
+    return count;
+}
+
+int Sim::filesFound() const {
+    int count = 0;
+    for (const auto& o : objects_) {
+        if (o.type == ObjType::File && o.taken) ++count;
+    }
+    return count;
 }
 
 int Sim::fuelCansInWorld() const {
@@ -316,65 +402,149 @@ int Sim::fuelCansInWorld() const {
 void Sim::debugTeleportPlayer(int id, double x, double z) {
     if (id < 0 || id >= static_cast<int>(players_.size())) return;
     players_[static_cast<size_t>(id)].pos = Vec2{x, z};
+    players_[static_cast<size_t>(id)].prevPos = Vec2{x, z};
+    players_[static_cast<size_t>(id)].lastSpeed = 0.0;
+}
+
+void Sim::addNoise(const Vec2& pos) {
+    noises_.push_back(pos);
+}
+
+void Sim::updateAnger(double dt) {
+    for (auto& m : monsters_) {
+        double rate = rageActive_ ? 2.5 : 0.35;
+        m.anger = std::min(100, m.anger + static_cast<int>(rate * dt));
+        if (rageActive_ && m.anger < 80) m.anger = 80;
+    }
 }
 
 void Sim::updateObjectives(double dt) {
-    const SimObject* vehicle = nullptr;
-    for (const auto& o : objects_) {
-        if (o.type == ObjType::Vehicle) vehicle = &o;
+    matchTime_ += dt;
+    if (!rageActive_ && matchTime_ >= kRageTime) {
+        rageActive_ = true;
+    }
+    if (matchTime_ >= kMatchTimeLimit) {
+        status_ = -1;
+    }
+    updateAnger(dt);
+
+    int need = requiredFuelPerGenerator();
+    if (players_.size() >= 4 && filesRequired_ == 0) {
+        filesRequired_ = kFilesForBigTeam;
+    }
+
+    if (!helicopterSpawned_ && generatorsPowered() && filesFound() >= filesRequired_) {
+        for (auto& o : objects_) {
+            if (o.type == ObjType::Vehicle) {
+                o.pos = randomFreeSpot();
+                o.phase = 1;
+                addNoise(o.pos);
+                helicopterSpawned_ = true;
+            }
+        }
     }
 
     for (auto& p : players_) {
         if (!p.alive || p.extracted) continue;
         InputCmd& cmd = inputs_[static_cast<size_t>(p.id)];
-        int carriedCan = -1;
+        bool held = cmd.interact;
+        bool pressed = held && prevHeldInteract_[static_cast<size_t>(p.id)] == 0;
+        prevHeldInteract_[static_cast<size_t>(p.id)] = held ? 1 : 0;
+
+        int carrying = p.carrying;
+        ObjType carryType = ObjType::Door;
         for (const auto& o : objects_) {
-            if (o.id == p.carrying && o.type == ObjType::FuelCan && !o.taken) carriedCan = o.id;
+            if (o.id == carrying) carryType = o.type;
         }
 
-        if (cmd.interact && carriedCan >= 0) {
-            for (auto& g : objects_) {
-                if (g.type != ObjType::Generator || g.charge >= kGeneratorFuelNeed) continue;
-                if (p.pos.distance(g.pos) > 1.9) continue;
-                g.progress += static_cast<float>(dt);
-                if (g.progress >= kChannelTime) {
-                    g.progress = 0.0f;
-                    g.charge += 1;
-                    for (auto& o : objects_) {
-                        if (o.id == carriedCan) {
-                            o.taken = true;
-                            o.holder = -1;
+        for (auto& g : objects_) {
+            if (g.type != ObjType::Generator) continue;
+            if (p.pos.distance(g.pos) > 1.9) continue;
+
+            if (g.charge < need && carryType == ObjType::FuelCan) {
+                if (!held) {
+                    if (g.op == p.id) g.op = -1;
+                } else if (g.op == -1 || g.op == p.id) {
+                    g.op = p.id;
+                    if (p.lastSpeed > kSpillMoveThreshold) {
+                        for (auto& o : objects_) {
+                            if (o.id == carrying) {
+                                o.holder = -1;
+                                o.pos = p.pos;
+                            }
+                        }
+                        p.carrying = -1;
+                        g.progress = 0.0f;
+                        g.op = -1;
+                        addNoise(p.pos);
+                    } else {
+                        g.progress += static_cast<float>(dt);
+                        if (g.progress >= kChannelTime) {
+                            g.progress = 0.0f;
+                            g.charge += 1;
+                            for (auto& o : objects_) {
+                                if (o.id == carrying) {
+                                    o.taken = true;
+                                    o.holder = -1;
+                                }
+                            }
+                            p.carrying = -1;
+                            g.op = -1;
+                            addNoise(g.pos);
                         }
                     }
-                    p.carrying = -1;
                 }
                 break;
             }
-            if (generatorsPowered() && vehicle && vehicle->charge < kVehicleFuelNeed &&
-                p.pos.distance(vehicle->pos) <= 2.2) {
-                SimObject* v = nullptr;
-                for (auto& o : objects_) {
-                    if (o.type == ObjType::Vehicle) v = &o;
+
+            if (g.charge >= need && g.aux < 1 && carryType == ObjType::Battery) {
+                if (!held && g.phase == 0) {
+                    if (g.op == p.id) g.op = -1;
                 }
-                if (v) {
-                    v->progress += static_cast<float>(dt);
-                    if (v->progress >= kChannelTime) {
-                        v->progress = 0.0f;
-                        v->charge += 1;
+                if (g.phase == 0) {
+                    if (held && (g.op == -1 || g.op == p.id)) {
+                        g.op = p.id;
+                        g.progress += static_cast<float>(dt);
+                        if (g.progress >= kBatteryClampTime) {
+                            g.phase = 1;
+                            g.progress = 0.0f;
+                        }
+                    } else {
+                        g.progress = 0.0f;
+                    }
+                } else if (g.phase == 1) {
+                    g.progress += static_cast<float>(dt);
+                    if (pressed) {
+                        g.aux = 1;
+                        g.phase = 0;
+                        g.progress = 0.0f;
+                        g.op = -1;
                         for (auto& o : objects_) {
-                            if (o.id == carriedCan) {
+                            if (o.id == carrying) {
                                 o.taken = true;
                                 o.holder = -1;
                             }
                         }
                         p.carrying = -1;
+                        addNoise(g.pos);
+                    } else if (g.progress >= kBatteryWindow) {
+                        g.phase = 0;
+                        g.progress = 0.0f;
+                        g.op = -1;
+                        p.hp = std::max(1.0, p.hp - 10.0);
+                        addNoise(p.pos);
                     }
                 }
+                break;
             }
         }
 
-        if (vehicle && vehicle->charge >= kVehicleFuelNeed &&
-            p.pos.distance(vehicle->pos) <= kExtractRange) {
+        const SimObject* vehicle = nullptr;
+        for (const auto& o : objects_) {
+            if (o.type == ObjType::Vehicle) vehicle = &o;
+        }
+        if (vehicle && vehicle->phase == 1 && p.pos.distance(vehicle->pos) <= kExtractRange &&
+            held) {
             p.extractTimer += dt;
             if (p.extractTimer >= kExtractTime) {
                 p.extracted = true;
@@ -385,15 +555,19 @@ void Sim::updateObjectives(double dt) {
     }
 
     bool anyActive = false;
+    bool anyExtracted = false;
+    bool anyAlive = false;
     for (const auto& p : players_) {
+        if (p.alive) anyAlive = true;
         if (p.alive && !p.extracted) anyActive = true;
+        if (p.extracted) anyExtracted = true;
     }
     if (!anyActive && !players_.empty() && status_ == 0) {
-        bool anyExtracted = false;
-        for (const auto& p : players_) {
-            if (p.extracted) anyExtracted = true;
+        if (anyExtracted) {
+            status_ = 1;
+        } else if (!anyAlive) {
+            status_ = -1;
         }
-        if (anyExtracted) status_ = 1;
     }
 }
 
@@ -425,13 +599,14 @@ Vec2 Sim::randomFreeSpot() {
 void Sim::updateMonsters(double dt) {
     const std::vector<unsigned char>& g = dynamicGrid_.empty() ? grid_ : dynamicGrid_;
     for (auto& m : monsters_) {
+        double sight = kMonsterSight * (1.0 + static_cast<double>(m.anger) / 400.0);
         int seen = -1;
         Vec2 seenPos;
         for (const auto& p : players_) {
             if (!p.alive) continue;
             Vec2 d = p.pos - m.pos;
             double dist = d.length();
-            if (dist > kMonsterSight) continue;
+            if (dist > sight) continue;
             bool moving = p.lastSpeed > kPlayerMovingThreshold;
             bool close = dist <= kMonsterCloseRange;
             if (!moving && !close) continue;
@@ -461,10 +636,35 @@ void Sim::updateMonsters(double dt) {
             }
         }
 
-        Vec2 goal = (m.state == 1) ? ((seen >= 0) ? seenPos : m.lastSeen) : m.patrolTarget;
+        for (const auto& noise : noises_) {
+            if (m.state == 1) break;
+            if (m.pos.distance(noise) <= 28.0) {
+                m.state = 2;
+                m.lastSeen = noise;
+                m.searchTimer = 6.0;
+                m.anger = std::min(100, m.anger + 8);
+                break;
+            }
+        }
+
+        double speedScale = 1.0 + static_cast<double>(m.anger) / 250.0;
+        Vec2 goal = m.patrolTarget;
+        if (m.state == 1) {
+            goal = (seen >= 0) ? seenPos : m.lastSeen;
+        } else if (m.state == 2) {
+            goal = m.lastSeen;
+            m.searchTimer -= dt;
+            if (m.searchTimer <= 0.0 || m.pos.distance(m.lastSeen) < 0.6) {
+                m.state = 0;
+                m.patrolTarget = randomFreeSpot();
+                m.patrolTimer = 0.0;
+            }
+        }
+
         Vec2 to = goal - m.pos;
         double dist = to.length();
-        double speed = (m.state == 1) ? kMonsterSpeedChase : kMonsterSpeedPatrol;
+        double baseSpeed = (m.state == 1) ? kMonsterSpeedChase : kMonsterSpeedPatrol;
+        double speed = baseSpeed * speedScale;
         if (dist > 0.08) {
             Vec2 dir = to.normalized();
             m.yaw = std::atan2(dir.x, dir.z);
@@ -478,6 +678,7 @@ void Sim::updateMonsters(double dt) {
             }
         }
     }
+    noises_.clear();
 }
 
 void Sim::refreshDynamicBlocks() {
@@ -543,6 +744,8 @@ int Sim::addPlayer(const std::string& name) {
     players_.push_back(p);
     inputs_.push_back(InputCmd{});
     prevInteract_.push_back(0);
+    prevHeldInteract_.push_back(0);
+    prevButtons_.push_back(0);
     return p.id;
 }
 
@@ -566,6 +769,7 @@ void Sim::movePlayer(PlayerState& p, const InputCmd& cmd, double dt) {
         dir = dir.normalized();
         double speed = p.sprinting ? kSprintSpeed : kWalkSpeed;
         if (p.carrying >= 0) speed *= 0.8;
+        if (p.crouched) speed *= kCrouchSpeedScale;
         Vec2 before = p.pos;
         moveOnGrid(p.pos, dir, speed, dt, dynamicGrid_.empty() ? grid_ : dynamicGrid_, size_);
         double maxDist = speed * dt * 1.25 + 0.06;
@@ -587,16 +791,21 @@ void Sim::movePlayer(PlayerState& p, const InputCmd& cmd, double dt) {
 
 void Sim::handleInteract(PlayerState& p) {
     SimObject* best = nullptr;
-    double bestD = 1.9;
+    double bestD = p.crouched ? kReachCrouched : kReachStanding;
     for (auto& o : objects_) {
         if (o.id == p.carrying) continue;
+        if (o.holder == -2) continue;
+        if (o.type == ObjType::Generator || o.type == ObjType::Vehicle) continue;
         if (o.type == ObjType::Pickup && o.taken) continue;
-        if (o.type == ObjType::FuelCan && o.taken) continue;
-        if ((o.type == ObjType::Crate || o.type == ObjType::FuelCan) && o.holder >= 0 &&
-            o.holder != p.id) {
+        if ((o.type == ObjType::FuelCan || o.type == ObjType::Battery ||
+             o.type == ObjType::MasterLock) &&
+            o.taken) {
             continue;
         }
-        if ((o.type == ObjType::Crate || o.type == ObjType::FuelCan) && p.carrying >= 0) continue;
+        bool carryable = o.type == ObjType::Crate || o.type == ObjType::FuelCan ||
+                         o.type == ObjType::Battery || o.type == ObjType::MasterLock;
+        if (carryable && o.holder >= 0 && o.holder != p.id) continue;
+        if (carryable && p.carrying >= 0) continue;
         double d = p.pos.distance(o.pos);
         if (d < bestD) {
             bestD = d;
@@ -605,22 +814,42 @@ void Sim::handleInteract(PlayerState& p) {
     }
 
     if (!best) {
-        if (p.carrying >= 0) {
-            for (auto& o : objects_) {
-                if (o.id == p.carrying) o.holder = -1;
-            }
-            p.carrying = -1;
-        }
         return;
     }
 
     if (best->type == ObjType::Door) {
+        if (best->phase == 1) {
+            if (p.carrying >= 0) {
+                SimObject* lockObj = nullptr;
+                for (auto& o : objects_) {
+                    if (o.id == p.carrying && o.type == ObjType::MasterLock) lockObj = &o;
+                }
+                if (lockObj) {
+                    lockObj->taken = true;
+                    lockObj->holder = -1;
+                    p.carrying = -1;
+                    if ((actionRng_() % 100) < 70) {
+                        best->phase = 0;
+                        best->open = true;
+                    }
+                    addNoise(p.pos);
+                }
+            }
+            return;
+        }
         best->open = !best->open;
+        addNoise(p.pos);
     } else if (best->type == ObjType::Pickup) {
         best->taken = true;
         p.hp = std::min(100.0, p.hp + 40.0);
         p.ammo += 12;
-    } else if (best->type == ObjType::Crate || best->type == ObjType::FuelCan) {
+        addNoise(p.pos);
+    } else if (best->type == ObjType::File) {
+        best->taken = true;
+        p.files += 1;
+        addNoise(p.pos);
+    } else if (best->type == ObjType::Crate || best->type == ObjType::FuelCan ||
+               best->type == ObjType::Battery || best->type == ObjType::MasterLock) {
         if (p.carrying < 0) {
             best->holder = p.id;
             p.carrying = best->id;
@@ -630,6 +859,80 @@ void Sim::handleInteract(PlayerState& p) {
             }
             p.carrying = -1;
         }
+        addNoise(p.pos);
+    }
+}
+
+void Sim::handleActions(PlayerState& p, uint8_t pressed, const InputCmd& cmd) {
+    auto dropCarried = [&](double dist) {
+        if (p.carrying < 0) return;
+        Vec2 f{std::sin(cmd.yaw), std::cos(cmd.yaw)};
+        for (auto& o : objects_) {
+            if (o.id != p.carrying) continue;
+            Vec2 place = p.pos;
+            for (double d = dist; d >= 0.0; d -= 2.0) {
+                Vec2 cand = p.pos + f * d;
+                if (!blockedCell(grid_, size_, cand.x, cand.z)) {
+                    place = cand;
+                    break;
+                }
+            }
+            o.pos = place;
+            o.holder = -1;
+            addNoise(place);
+        }
+        p.carrying = -1;
+    };
+
+    if (pressed & 0x01) dropCarried(1.2);
+    if (pressed & 0x02) dropCarried(kThrowDistance);
+    if (pressed & 0x04) {
+        if (p.carrying >= 0) {
+            int slot = p.stash0 < 0 ? 0 : (p.stash1 < 0 ? 1 : -1);
+            if (slot == 0) {
+                p.stash0 = p.carrying;
+            } else if (slot == 1) {
+                p.stash1 = p.carrying;
+            }
+            if (slot >= 0) {
+                for (auto& o : objects_) {
+                    if (o.id == p.carrying) o.holder = -2;
+                }
+                p.carrying = -1;
+            }
+        }
+    }
+    if (pressed & 0x08) {
+        if (p.carrying < 0) {
+            int id = p.stash0 >= 0 ? p.stash0 : p.stash1;
+            if (id >= 0) {
+                for (auto& o : objects_) {
+                    if (o.id == id) o.holder = p.id;
+                }
+                p.carrying = id;
+                if (p.stash0 == id) {
+                    p.stash0 = -1;
+                } else {
+                    p.stash1 = -1;
+                }
+            }
+        }
+    }
+    if (pressed & 0x10) {
+        dropCarried(1.2);
+        int stashIds[2] = {p.stash0, p.stash1};
+        for (int id : stashIds) {
+            if (id < 0) continue;
+            for (auto& o : objects_) {
+                if (o.id == id) {
+                    o.holder = -1;
+                    o.pos = p.pos;
+                }
+            }
+            addNoise(p.pos);
+        }
+        p.stash0 = -1;
+        p.stash1 = -1;
     }
 }
 
@@ -641,11 +944,24 @@ void Sim::step(double dt) {
         if (!p.alive) continue;
         InputCmd& cmd = inputs_[static_cast<size_t>(p.id)];
         p.interact = cmd.interact;
+        p.crouched = cmd.crouch;
+
+        uint8_t buttons = 0;
+        if (cmd.drop) buttons |= 0x01;
+        if (cmd.throwItem) buttons |= 0x02;
+        if (cmd.stash) buttons |= 0x04;
+        if (cmd.unstash) buttons |= 0x08;
+        if (cmd.dropAll) buttons |= 0x10;
+        uint8_t pressed = static_cast<uint8_t>(buttons & ~prevButtons_[static_cast<size_t>(p.id)]);
+        prevButtons_[static_cast<size_t>(p.id)] = buttons;
 
         bool edge = cmd.interact && prevInteract_[static_cast<size_t>(p.id)] == 0;
         prevInteract_[static_cast<size_t>(p.id)] = cmd.interact ? 1 : 0;
         if (edge) {
             handleInteract(p);
+        }
+        if (pressed) {
+            handleActions(p, pressed, cmd);
         }
         p.prevPos = p.pos;
         movePlayer(p, cmd, dt);

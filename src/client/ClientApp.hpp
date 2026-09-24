@@ -43,7 +43,13 @@ struct ClientDebugState {
     double monsterZ = 0.0;
     int fuelCans = 0;
     int gensPowered = 0;
-    int vehicleCharge = 0;
+    int gensFueled = 0;
+    int gensBattery = 0;
+    int filesFound = 0;
+    int filesNeed = 0;
+    int timerSec = 0;
+    bool rage = false;
+    int gensFuelNeed = 4;
     int matchStatus = 0;
     double ownX = 0.0;
     double ownZ = 0.0;
@@ -91,10 +97,18 @@ private:
     std::unordered_map<int, sc::SnapshotMonster> netMonsters_;
     uint32_t serverTick_ = 0;
     uint8_t serverStatus_ = 0;
+    uint16_t serverTimer_ = 0;
+    uint8_t serverFilesNeed_ = 0;
+    uint8_t serverFilesDone_ = 0;
+    uint8_t serverFuelNeed_ = 4;
+    bool serverRage_ = false;
 
     double inputTimer_ = 0.0;
     unsigned int seq_ = 0;
     bool showPanel_ = true;
     bool quit_ = false;
+    int altCount_ = 0;
+    double altTimer_ = 0.0;
+    bool flashlight_ = false;
     ClientDebugState dbg_;
 };

@@ -155,6 +155,8 @@ std::vector<uint8_t> encodeWelcome(const WelcomeData& welcome) {
         w.u8(flags);
         w.i16(static_cast<int16_t>(o.holder));
         w.u8(static_cast<uint8_t>(std::max(0, std::min(255, o.charge))));
+        w.u8(o.aux);
+        w.u8(o.phase);
     }
     return w.data();
 }
@@ -197,7 +199,7 @@ bool decodeWelcome(const uint8_t* data, size_t size, WelcomeData& welcome) {
         int16_t holder = -1;
         uint8_t charge = 0;
         if (!r.u16(id) || !r.u8(o.type) || !r.f32(o.x) || !r.f32(o.z) || !r.u8(flags) ||
-            !r.i16(holder) || !r.u8(charge)) {
+            !r.i16(holder) || !r.u8(charge) || !r.u8(o.aux) || !r.u8(o.phase)) {
             return false;
         }
         o.id = id;
@@ -236,6 +238,12 @@ std::vector<uint8_t> encodeInput(const InputCmd& cmd) {
     uint8_t flags = 0;
     if (cmd.sprint) flags |= 0x01;
     if (cmd.interact) flags |= 0x02;
+    if (cmd.drop) flags |= 0x04;
+    if (cmd.throwItem) flags |= 0x08;
+    if (cmd.crouch) flags |= 0x10;
+    if (cmd.stash) flags |= 0x20;
+    if (cmd.unstash) flags |= 0x40;
+    if (cmd.dropAll) flags |= 0x80;
     w.u8(flags);
     return w.data();
 }
@@ -256,6 +264,12 @@ bool decodeInput(const uint8_t* data, size_t size, InputCmd& cmd) {
     cmd.yaw = yaw;
     cmd.sprint = (flags & 0x01) != 0;
     cmd.interact = (flags & 0x02) != 0;
+    cmd.drop = (flags & 0x04) != 0;
+    cmd.throwItem = (flags & 0x08) != 0;
+    cmd.crouch = (flags & 0x10) != 0;
+    cmd.stash = (flags & 0x20) != 0;
+    cmd.unstash = (flags & 0x40) != 0;
+    cmd.dropAll = (flags & 0x80) != 0;
     return true;
 }
 
@@ -265,6 +279,11 @@ std::vector<uint8_t> encodeSnapshot(const Snapshot& snap) {
     w.u32(snap.tick);
     w.u8(snap.baseline ? 1 : 0);
     w.u8(snap.status);
+    w.u16(snap.timerSec);
+    w.u8(snap.filesNeed);
+    w.u8(snap.filesDone);
+    w.u8(snap.rage);
+    w.u8(snap.fuelNeed);
     w.u16(static_cast<uint16_t>(snap.players.size()));
     for (const auto& p : snap.players) {
         w.u16(static_cast<uint16_t>(p.id));
@@ -273,6 +292,7 @@ std::vector<uint8_t> encodeSnapshot(const Snapshot& snap) {
         w.u8(quantYaw(p.yaw));
         w.u8(static_cast<uint8_t>(std::max(0.0f, std::min(100.0f, p.hp))));
         w.u8(p.flags);
+        w.u8(p.files);
     }
     w.u16(static_cast<uint16_t>(snap.objects.size()));
     for (const auto& o : snap.objects) {
@@ -284,6 +304,8 @@ std::vector<uint8_t> encodeSnapshot(const Snapshot& snap) {
         w.i16(static_cast<int16_t>(o.holder));
         w.u8(o.charge);
         w.u8(o.progress);
+        w.u8(o.aux);
+        w.u8(o.phase);
     }
     w.u16(static_cast<uint16_t>(snap.monsters.size()));
     for (const auto& m : snap.monsters) {
@@ -292,6 +314,7 @@ std::vector<uint8_t> encodeSnapshot(const Snapshot& snap) {
         w.i16(quantPos(m.z));
         w.u8(quantYaw(m.yaw));
         w.u8(m.state);
+        w.u8(m.anger);
     }
     return w.data();
 }
@@ -302,11 +325,24 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
     uint32_t tick = 0;
     uint8_t baseline = 0;
     uint8_t status = 0;
+    uint16_t timerSec = 0;
+    uint8_t filesNeed = 0;
+    uint8_t filesDone = 0;
+    uint8_t rage = 0;
+    uint8_t fuelNeed = 0;
     if (!r.u8(type) || type != static_cast<uint8_t>(MsgType::Snapshot)) return false;
-    if (!r.u32(tick) || !r.u8(baseline) || !r.u8(status)) return false;
+    if (!r.u32(tick) || !r.u8(baseline) || !r.u8(status) || !r.u16(timerSec) || !r.u8(filesNeed) ||
+        !r.u8(filesDone) || !r.u8(rage) || !r.u8(fuelNeed)) {
+        return false;
+    }
     snap.tick = tick;
     snap.baseline = baseline != 0;
     snap.status = status;
+    snap.timerSec = timerSec;
+    snap.filesNeed = filesNeed;
+    snap.filesDone = filesDone;
+    snap.rage = rage;
+    snap.fuelNeed = fuelNeed;
 
     uint16_t pcount = 0;
     if (!r.u16(pcount)) return false;
@@ -319,7 +355,9 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         uint8_t yaw = 0;
         uint8_t hp = 0;
         uint8_t flags = 0;
-        if (!r.u16(id) || !r.i16(qx) || !r.i16(qz) || !r.u8(yaw) || !r.u8(hp) || !r.u8(flags)) {
+        uint8_t files = 0;
+        if (!r.u16(id) || !r.i16(qx) || !r.i16(qz) || !r.u8(yaw) || !r.u8(hp) || !r.u8(flags) ||
+            !r.u8(files)) {
             return false;
         }
         SnapshotPlayer p;
@@ -329,6 +367,7 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         p.yaw = static_cast<float>(dequantYaw(yaw));
         p.hp = static_cast<float>(hp);
         p.flags = flags;
+        p.files = files;
         snap.players.push_back(p);
     }
 
@@ -345,8 +384,10 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         int16_t holder = -1;
         uint8_t charge = 0;
         uint8_t progress = 0;
+        uint8_t aux = 0;
+        uint8_t phase = 0;
         if (!r.u16(id) || !r.u8(otype) || !r.i16(qx) || !r.i16(qz) || !r.u8(flags) ||
-            !r.i16(holder) || !r.u8(charge) || !r.u8(progress)) {
+            !r.i16(holder) || !r.u8(charge) || !r.u8(progress) || !r.u8(aux) || !r.u8(phase)) {
             return false;
         }
         SnapshotObject o;
@@ -358,6 +399,8 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         o.holder = holder;
         o.charge = charge;
         o.progress = progress;
+        o.aux = aux;
+        o.phase = phase;
         snap.objects.push_back(o);
     }
 
@@ -371,7 +414,8 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         int16_t qz = 0;
         uint8_t yaw = 0;
         uint8_t st = 0;
-        if (!r.u16(id) || !r.i16(qx) || !r.i16(qz) || !r.u8(yaw) || !r.u8(st)) {
+        uint8_t anger = 0;
+        if (!r.u16(id) || !r.i16(qx) || !r.i16(qz) || !r.u8(yaw) || !r.u8(st) || !r.u8(anger)) {
             return false;
         }
         SnapshotMonster m;
@@ -380,6 +424,7 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snap) {
         m.z = static_cast<float>(dequantPos(qz));
         m.yaw = static_cast<float>(dequantYaw(yaw));
         m.state = st;
+        m.anger = anger;
         snap.monsters.push_back(m);
     }
     return true;

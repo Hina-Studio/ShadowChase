@@ -18,6 +18,9 @@ enum class ObjType : uint8_t {
     FuelCan = 4,
     Generator = 5,
     Vehicle = 6,
+    Battery = 7,
+    File = 8,
+    MasterLock = 9,
 };
 
 struct SimObject {
@@ -29,6 +32,9 @@ struct SimObject {
     int holder = -1;
     int charge = 0;
     float progress = 0.0f;
+    int aux = 0;
+    uint8_t phase = 0;
+    int op = -1;
 };
 
 struct PlayerState {
@@ -46,6 +52,10 @@ struct PlayerState {
     bool alive = true;
     bool extracted = false;
     double extractTimer = 0.0;
+    int files = 0;
+    bool crouched = false;
+    int stash0 = -1;
+    int stash1 = -1;
 };
 
 struct MonsterState {
@@ -58,6 +68,8 @@ struct MonsterState {
     int target = -1;
     double loseTimer = 0.0;
     double patrolTimer = 0.0;
+    int anger = 0;
+    double searchTimer = 0.0;
 };
 
 constexpr double kMonsterSpeedPatrol = 2.0;
@@ -66,12 +78,25 @@ constexpr double kMonsterSight = 18.0;
 constexpr double kMonsterCloseRange = 3.0;
 constexpr double kMonsterLoseTime = 3.0;
 constexpr double kPlayerMovingThreshold = 0.6;
-constexpr int kGeneratorFuelNeed = 1;
-constexpr int kVehicleFuelNeed = 2;
-constexpr int kFuelCanTotal = 6;
+constexpr int kGeneratorFuelNeed = 4;
+constexpr int kFuelCanTotal = 14;
+constexpr int kBatteryTotal = 3;
+constexpr int kFileTotal = 5;
+constexpr int kGeneratorCount = 2;
 constexpr double kChannelTime = 2.0;
 constexpr double kExtractTime = 1.5;
 constexpr double kExtractRange = 3.0;
+constexpr double kMatchTimeLimit = 1200.0;
+constexpr double kRageTime = 900.0;
+constexpr double kBatteryClampTime = 0.8;
+constexpr double kBatteryWindow = 1.5;
+constexpr double kSpillMoveThreshold = 0.35;
+constexpr int kFilesForBigTeam = 3;
+constexpr int kMasterLockTotal = 2;
+constexpr double kThrowDistance = 6.0;
+constexpr double kReachStanding = 1.6;
+constexpr double kReachCrouched = 2.0;
+constexpr double kCrouchSpeedScale = 0.6;
 
 struct InputCmd {
     double moveX = 0.0;
@@ -79,6 +104,12 @@ struct InputCmd {
     double yaw = 0.0;
     bool sprint = false;
     bool interact = false;
+    bool drop = false;
+    bool throwItem = false;
+    bool crouch = false;
+    bool stash = false;
+    bool unstash = false;
+    bool dropAll = false;
     unsigned int seq = 0;
 };
 
@@ -107,6 +138,13 @@ public:
     int rejects() const { return rejects_; }
     int status() const { return status_; }
     const std::string& layoutReason() const { return layoutReason_; }
+    double matchTime() const { return matchTime_; }
+    bool rageActive() const { return rageActive_; }
+    int filesRequired() const { return filesRequired_; }
+    int filesFound() const;
+    int generatorsFueled() const;
+    int generatorsBatteries() const;
+    int requiredFuelPerGenerator() const;
     bool generatorsPowered() const;
     int fuelCansInWorld() const;
     void debugTeleportPlayer(int id, double x, double z);
@@ -124,6 +162,9 @@ private:
     void refreshDynamicBlocks();
     void updateMonsters(double dt);
     void updateObjectives(double dt);
+    void updateAnger(double dt);
+    void addNoise(const Vec2& pos);
+    void handleActions(PlayerState& p, uint8_t pressed, const InputCmd& cmd);
     void placeQuestObjects();
     bool validateLayout(std::string& reason) const;
     bool reachableFrom(const Vec2& start, const Vec2& goal,
@@ -142,6 +183,9 @@ private:
     std::vector<PlayerState> players_;
     std::vector<InputCmd> inputs_;
     std::vector<unsigned char> prevInteract_;
+    std::vector<unsigned char> prevHeldInteract_;
+    std::vector<unsigned char> prevButtons_;
+    std::mt19937 actionRng_;
     std::vector<unsigned char> grid_;
     std::vector<unsigned char> dynamicGrid_;
     std::vector<SimObject> objects_;
@@ -150,5 +194,10 @@ private:
     int status_ = 0;
     int vehicleId_ = -1;
     std::string layoutReason_ = "ok";
+    std::vector<Vec2> noises_;
+    double matchTime_ = 0.0;
+    bool rageActive_ = false;
+    int filesRequired_ = 0;
+    bool helicopterSpawned_ = false;
 };
 }

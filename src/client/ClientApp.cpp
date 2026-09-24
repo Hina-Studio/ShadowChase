@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include <raylib.h>
@@ -166,6 +167,11 @@ void ClientApp::handleEvents() {
                 if (sc::decodeSnapshot(event.packet->data, event.packet->dataLength, snap)) {
                     serverTick_ = snap.tick;
                     serverStatus_ = snap.status;
+                    serverTimer_ = snap.timerSec;
+                    serverFilesNeed_ = snap.filesNeed;
+                    serverFilesDone_ = snap.filesDone;
+                    serverFuelNeed_ = snap.fuelNeed;
+                    serverRage_ = snap.rage != 0;
                     if (snap.baseline) {
                         netPlayers_.clear();
                         netObjects_.clear();
@@ -208,13 +214,36 @@ void ClientApp::sendInput(double dt) {
     double fwd = (IsKeyDown(KEY_W) ? 1.0 : 0.0) - (IsKeyDown(KEY_S) ? 1.0 : 0.0);
     double side = (IsKeyDown(KEY_D) ? 1.0 : 0.0) - (IsKeyDown(KEY_A) ? 1.0 : 0.0);
     bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
-    bool interact = IsKeyDown(KEY_E);
+    bool interact = IsKeyDown(KEY_E) || IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    bool drop = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !IsKeyDown(KEY_F);
+    bool throwItem = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && IsKeyPressed(KEY_F);
+    bool crouch = IsKeyDown(KEY_C);
+    bool stash = IsKeyPressed(KEY_H);
+    bool unstash = IsKeyPressed(KEY_G);
+    bool dropAll = false;
+
+    if (IsKeyPressed(KEY_LEFT_ALT) || IsKeyPressed(KEY_RIGHT_ALT)) {
+        altCount_ += 1;
+        altTimer_ = 1.0;
+        if (altCount_ >= 3) {
+            dropAll = true;
+            altCount_ = 0;
+        }
+    }
+    if (IsKeyPressed(KEY_F) && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+        flashlight_ = !flashlight_;
+    }
+    if (altTimer_ > 0.0) {
+        altTimer_ -= dt;
+        if (altTimer_ <= 0.0) altCount_ = 0;
+    }
 
     if (IsGamepadAvailable(0)) {
         fwd += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_Y) * -1.0;
         side += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
         sprint = sprint || IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_2);
         interact = interact || IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+        crouch = crouch || IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT);
         dbg_.padActive = true;
     } else {
         dbg_.padActive = false;
@@ -231,6 +260,12 @@ void ClientApp::sendInput(double dt) {
     cmd.yaw = yaw_;
     cmd.sprint = sprint;
     cmd.interact = interact;
+    cmd.drop = drop;
+    cmd.throwItem = throwItem;
+    cmd.crouch = crouch;
+    cmd.stash = stash;
+    cmd.unstash = unstash;
+    cmd.dropAll = dropAll;
     cmd.seq = ++seq_;
 
     auto payload = sc::encodeInput(cmd);
@@ -257,10 +292,12 @@ void ClientApp::updateLocal(double dt) {
     double fwd = (IsKeyDown(KEY_W) ? 1.0 : 0.0) - (IsKeyDown(KEY_S) ? 1.0 : 0.0);
     double side = (IsKeyDown(KEY_D) ? 1.0 : 0.0) - (IsKeyDown(KEY_A) ? 1.0 : 0.0);
     bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
+    bool crouch = IsKeyDown(KEY_C);
     if (IsGamepadAvailable(0)) {
         fwd += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_Y) * -1.0;
         side += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
         sprint = sprint || IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_2);
+        crouch = crouch || IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT);
     }
     fwd = std::max(-1.0, std::min(1.0, fwd));
     side = std::max(-1.0, std::min(1.0, side));
@@ -286,43 +323,66 @@ void ClientApp::updateLocal(double dt) {
     sc::InputCmd clean = sc::sanitizeInput(cmd);
     double speed = clean.sprint ? sc::kSprintSpeed : sc::kWalkSpeed;
     if (carrying) speed *= 0.8;
+    if (crouch) speed *= sc::kCrouchSpeedScale;
     sc::Sim::moveOnGrid(predicted_, sc::Vec2{clean.moveX, clean.moveZ}.normalized(), speed, dt,
                         useGrid, mapSize_);
 }
 
 std::string ClientApp::interactionPrompt() const {
     bool carryingCan = false;
+    bool carryingBattery = false;
+    bool carryingLock = false;
     bool anyGen = false;
     bool gensPowered = true;
-    int vehicleCharge = -1;
+    int gensFueled = 0;
+    int gensBattery = 0;
+    int fuelNeed = serverFuelNeed_ > 0 ? serverFuelNeed_ : 4;
+    const sc::SnapshotObject* vehicle = nullptr;
     for (const auto& kv : netObjects_) {
         const sc::SnapshotObject& o = kv.second;
-        if (o.type == static_cast<uint8_t>(sc::ObjType::FuelCan) && o.holder == playerId_) {
-            carryingCan = true;
+        if (o.holder == playerId_) {
+            if (o.type == static_cast<uint8_t>(sc::ObjType::FuelCan)) carryingCan = true;
+            if (o.type == static_cast<uint8_t>(sc::ObjType::Battery)) carryingBattery = true;
+            if (o.type == static_cast<uint8_t>(sc::ObjType::MasterLock)) carryingLock = true;
         }
         if (o.type == static_cast<uint8_t>(sc::ObjType::Generator)) {
             anyGen = true;
-            if (o.charge < 1) gensPowered = false;
+            if (o.charge >= fuelNeed) ++gensFueled;
+            if (o.aux >= 1) ++gensBattery;
+            if (o.charge < fuelNeed || o.aux < 1) gensPowered = false;
         }
         if (o.type == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
-            vehicleCharge = o.charge;
+            vehicle = &o;
         }
     }
     if (!anyGen) gensPowered = false;
 
+    bool crouched = IsKeyDown(KEY_C);
+    auto reachFor = [&](uint8_t type) {
+        bool low = type == static_cast<uint8_t>(sc::ObjType::FuelCan) ||
+                   type == static_cast<uint8_t>(sc::ObjType::Battery) ||
+                   type == static_cast<uint8_t>(sc::ObjType::File) ||
+                   type == static_cast<uint8_t>(sc::ObjType::Crate);
+        if (!low) return 2.2;
+        return crouched ? 1.8 : 1.2;
+    };
+
     double fx = std::sin(yaw_);
     double fz = std::cos(yaw_);
     const sc::SnapshotObject* best = nullptr;
-    double bestD = 2.2;
+    double bestD = 99.0;
     for (const auto& kv : netObjects_) {
         const sc::SnapshotObject& o = kv.second;
         double dx = o.x - predicted_.x;
         double dz = o.z - predicted_.z;
         double d = std::sqrt(dx * dx + dz * dz);
+        if (d > reachFor(o.type) + 0.4) continue;
         if (d > bestD) continue;
         if (dx * fx + dz * fz < -0.2) continue;
         if (o.type == static_cast<uint8_t>(sc::ObjType::Pickup) && (o.flags & 0x02)) continue;
-        if (o.type == static_cast<uint8_t>(sc::ObjType::FuelCan) &&
+        if ((o.type == static_cast<uint8_t>(sc::ObjType::FuelCan) ||
+             o.type == static_cast<uint8_t>(sc::ObjType::Battery) ||
+             o.type == static_cast<uint8_t>(sc::ObjType::MasterLock)) &&
             ((o.flags & 0x02) || o.holder >= 0)) {
             continue;
         }
@@ -330,33 +390,61 @@ std::string ClientApp::interactionPrompt() const {
         bestD = d;
     }
 
+    std::string prompt;
     if (best) {
         uint8_t t = best->type;
         if (t == static_cast<uint8_t>(sc::ObjType::Door)) {
-            return (best->flags & 0x01) ? "[E] close door" : "[E] open door";
-        }
-        if (t == static_cast<uint8_t>(sc::ObjType::Crate)) {
-            return best->holder == playerId_ ? "[E] drop crate" : "[E] carry crate (slower)";
-        }
-        if (t == static_cast<uint8_t>(sc::ObjType::Pickup)) {
-            return "[E] pick up supplies (+40 hp, +12 ammo)";
-        }
-        if (t == static_cast<uint8_t>(sc::ObjType::FuelCan)) {
-            return "[E] pick up fuel can";
-        }
-        if (t == static_cast<uint8_t>(sc::ObjType::Generator)) {
-            if (best->charge >= 1) return "generator online";
-            return carryingCan ? "[HOLD E] refuel generator" : "generator needs a fuel can";
-        }
-        if (t == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
-            if (!gensPowered) return "vehicle locked - power the generators first";
-            if (best->charge >= 2) return "EVACUATION ACTIVE - stand in the ring";
-            return carryingCan ? "[HOLD E] load fuel (" + std::to_string(best->charge) + "/2)"
-                               : "vehicle needs fuel (" + std::to_string(best->charge) + "/2)";
+            if (best->phase == 1) {
+                prompt = carryingLock ? "[LMB] knock the lock (may break)"
+                                      : "locked door - needs the 607 master lock";
+            } else {
+                prompt = (best->flags & 0x01) ? "[LMB] close door" : "[LMB] open door";
+            }
+        } else if (t == static_cast<uint8_t>(sc::ObjType::Crate)) {
+            prompt = best->holder == playerId_ ? "[RMB] drop crate" : "[LMB] carry crate (slower)";
+        } else if (t == static_cast<uint8_t>(sc::ObjType::Pickup)) {
+            prompt = "[LMB] pick up supplies (+40 hp, +12 ammo)";
+        } else if (t == static_cast<uint8_t>(sc::ObjType::FuelCan)) {
+            prompt = "[LMB] pick up fuel can" + std::string(crouched ? "" : " (crouch C for low items)");
+        } else if (t == static_cast<uint8_t>(sc::ObjType::Battery)) {
+            prompt = "[LMB] pick up battery" + std::string(crouched ? "" : " (crouch C for low items)");
+        } else if (t == static_cast<uint8_t>(sc::ObjType::File)) {
+            prompt = "[LMB] collect file";
+        } else if (t == static_cast<uint8_t>(sc::ObjType::Generator)) {
+            if (best->charge < fuelNeed) {
+                prompt = carryingCan ? "[HOLD LMB/E] refuel (" + std::to_string(best->charge) + "/" +
+                                          std::to_string(fuelNeed) + ")"
+                                    : "generator needs fuel (" + std::to_string(best->charge) + "/" +
+                                          std::to_string(fuelNeed) + ")";
+            } else if (best->aux < 1) {
+                if (!carryingBattery) {
+                    prompt = "generator needs a battery";
+                } else if (best->phase == 0) {
+                    prompt = "[HOLD LMB/E] clamp A on the white signal";
+                } else {
+                    prompt = "[PRESS LMB/E] clamp B now!";
+                }
+            } else {
+                prompt = "generator online";
+            }
+        } else if (t == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
+            if (vehicle && vehicle->phase == 1) {
+                prompt = "EVACUATION ACTIVE - hold LMB/E in the ring";
+            } else {
+                prompt = "escape locked - gens " + std::to_string(gensFueled) + "/2 fuel, battery " +
+                         std::to_string(gensBattery) + "/2, files " +
+                         std::to_string(serverFilesDone_) + "/" + std::to_string(serverFilesNeed_);
+            }
+        } else if (t == static_cast<uint8_t>(sc::ObjType::MasterLock)) {
+            prompt = "[LMB] pick up master lock";
         }
     }
-    if (vehicleCharge >= 2) return "EVACUATION ACTIVE - stand in the ring";
-    return "";
+
+    if (prompt.empty() && vehicle && vehicle->phase == 1) {
+        prompt = "EVACUATION ACTIVE - hold LMB/E in the ring";
+    }
+    (void)gensPowered;
+    return prompt;
 }
 
 void ClientApp::render() {
@@ -407,14 +495,28 @@ void ClientApp::render() {
             if ((o.flags & 0x02) != 0 || o.holder >= 0) continue;
             DrawCube(Vector3{o.x, 0.35f, o.z}, 0.5f, 0.7f, 0.5f, Color{90, 160, 255, 255});
             DrawCubeWires(Vector3{o.x, 0.35f, o.z}, 0.5f, 0.7f, 0.5f, Color{30, 60, 120, 255});
+        } else if (type == static_cast<uint8_t>(sc::ObjType::Battery)) {
+            if ((o.flags & 0x02) != 0 || o.holder >= 0) continue;
+            DrawCube(Vector3{o.x, 0.3f, o.z}, 0.45f, 0.6f, 0.3f, Color{200, 220, 90, 255});
+            DrawCubeWires(Vector3{o.x, 0.3f, o.z}, 0.45f, 0.6f, 0.3f, Color{80, 90, 20, 255});
+        } else if (type == static_cast<uint8_t>(sc::ObjType::File)) {
+            if ((o.flags & 0x02) != 0) continue;
+            DrawCube(Vector3{o.x, 0.12f, o.z}, 0.35f, 0.08f, 0.45f, Color{240, 240, 230, 255});
+            DrawCubeWires(Vector3{o.x, 0.12f, o.z}, 0.35f, 0.08f, 0.45f, Color{120, 120, 110, 255});
         } else if (type == static_cast<uint8_t>(sc::ObjType::Generator)) {
-            bool powered = o.charge >= 1;
-            Color c = powered ? Color{90, 230, 120, 255} : Color{230, 200, 70, 255};
+            int need = serverFuelNeed_ > 0 ? serverFuelNeed_ : 4;
+            bool fueled = o.charge >= need;
+            bool batt = o.aux >= 1;
+            Color c = (fueled && batt) ? Color{90, 230, 120, 255}
+                                       : (fueled ? Color{240, 220, 80, 255} : Color{230, 180, 60, 255});
             DrawCube(Vector3{o.x, 0.8f, o.z}, 1.2f, 1.6f, 1.2f, c);
             DrawCubeWires(Vector3{o.x, 0.8f, o.z}, 1.2f, 1.6f, 1.2f, Color{60, 50, 20, 255});
+            if (batt) {
+                DrawCube(Vector3{o.x, 1.75f, o.z}, 0.4f, 0.3f, 0.4f, Color{90, 220, 255, 255});
+            }
         } else if (type == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
-            bool ready = o.charge >= 2;
-            Color c = ready ? Color{90, 230, 120, 255} : Color{140, 140, 150, 255};
+            bool ready = o.phase == 1;
+            Color c = ready ? Color{90, 230, 120, 255} : Color{130, 130, 140, 255};
             DrawCube(Vector3{o.x, 1.0f, o.z}, 2.4f, 2.0f, 1.6f, c);
             DrawCubeWires(Vector3{o.x, 1.0f, o.z}, 2.4f, 2.0f, 1.6f, Color{40, 40, 45, 255});
             if (ready) {
@@ -466,8 +568,14 @@ void ClientApp::render() {
     }
     dbg_.fuelCans = 0;
     dbg_.gensPowered = 0;
-    dbg_.vehicleCharge = 0;
+    dbg_.gensFueled = 0;
+    dbg_.gensBattery = 0;
     dbg_.matchStatus = serverStatus_;
+    dbg_.filesNeed = serverFilesNeed_;
+    dbg_.filesFound = serverFilesDone_;
+    dbg_.timerSec = serverTimer_;
+    dbg_.rage = serverRage_;
+    dbg_.gensFuelNeed = serverFuelNeed_ > 0 ? serverFuelNeed_ : 4;
     for (const auto& kv : netObjects_) {
         const sc::SnapshotObject& o = kv.second;
         if (o.type == static_cast<uint8_t>(sc::ObjType::FuelCan) && !(o.flags & 0x02) &&
@@ -475,10 +583,9 @@ void ClientApp::render() {
             dbg_.fuelCans += 1;
         }
         if (o.type == static_cast<uint8_t>(sc::ObjType::Generator)) {
-            if (o.charge >= 1) dbg_.gensPowered += 1;
-        }
-        if (o.type == static_cast<uint8_t>(sc::ObjType::Vehicle)) {
-            dbg_.vehicleCharge = o.charge;
+            if (o.charge >= dbg_.gensFuelNeed) dbg_.gensFueled += 1;
+            if (o.aux >= 1) dbg_.gensBattery += 1;
+            if (o.charge >= dbg_.gensFuelNeed && o.aux >= 1) dbg_.gensPowered += 1;
         }
     }
     dbg_.ownX = predicted_.x;
@@ -537,6 +644,53 @@ void ClientApp::render() {
         const char* done = "EXTRACTION COMPLETE";
         int w = MeasureText(done, 30);
         DrawText(done, GetScreenWidth() / 2 - w / 2, 60, 30, Color{90, 230, 120, 255});
+    }
+
+    {
+        int remain = static_cast<int>(sc::kMatchTimeLimit) - static_cast<int>(serverTimer_);
+        if (remain < 0) remain = 0;
+        const char* timerText = TextFormat("%d:%02d", remain / 60, remain % 60);
+        Color timerColor = remain <= 300 ? Color{255, 80, 80, 255} : Color{230, 230, 235, 255};
+        DrawText(timerText, GetScreenWidth() - MeasureText(timerText, 26) - 14, 34, 26,
+                 timerColor);
+
+        if (serverRage_) {
+            const char* rage = "RAGE";
+            int w = MeasureText(rage, 34);
+            DrawText(rage, GetScreenWidth() / 2 - w / 2, 110, 34, Color{255, 60, 60, 255});
+        }
+
+        if (IsKeyDown(KEY_C)) {
+            DrawText("CROUCH (quieter, slower)", 12, 64, 16, Color{150, 220, 255, 255});
+        }
+        if (flashlight_) {
+            DrawText("FLASHLIGHT ON", 12, 84, 16, Color{255, 240, 160, 255});
+        }
+
+        if (IsKeyDown(KEY_TAB)) {
+            int pw = 420;
+            int ph = 210;
+            int px0 = GetScreenWidth() / 2 - pw / 2;
+            int py0 = GetScreenHeight() / 2 - ph / 2;
+            DrawRectangle(px0, py0, pw, ph, Color{0, 0, 0, 210});
+            DrawRectangleLines(px0, py0, pw, ph, Color{200, 200, 210, 255});
+            DrawText("TASKS (Tab)", px0 + 12, py0 + 10, 20, Color{255, 230, 140, 255});
+            char line[128];
+            std::snprintf(line, sizeof(line), "Generators: fueled %d/2   battery %d/2", dbg_.gensFueled,
+                          dbg_.gensBattery);
+            DrawText(line, px0 + 12, py0 + 42, 18, Color{230, 230, 235, 255});
+            std::snprintf(line, sizeof(line), "Files: %d/%d", dbg_.filesFound, dbg_.filesNeed);
+            DrawText(line, px0 + 12, py0 + 66, 18, Color{230, 230, 235, 255});
+            std::snprintf(line, sizeof(line), "Fuel cans left: %d   Master locks: ?", dbg_.fuelCans);
+            DrawText(line, px0 + 12, py0 + 90, 18, Color{230, 230, 235, 255});
+            DrawText(serverStatus_ == 0 ? "Escape: complete tasks first" : "Escape: call received",
+                     px0 + 12, py0 + 114, 18,
+                     serverStatus_ == 0 ? Color{230, 230, 235, 255} : Color{90, 230, 120, 255});
+            DrawText("LMB pick/interact  RMB drop  RMB+F throw  H stash  G take", px0 + 12, py0 + 142,
+                     14, Color{170, 170, 180, 255});
+            DrawText("C crouch  F flashlight  Alt x3 drop all  Q/E balance fuel", px0 + 12, py0 + 162,
+                     14, Color{170, 170, 180, 255});
+        }
     }
 
     DrawText("WASD move  SHIFT sprint  E interact  F1 panel  ESC quit", 12,

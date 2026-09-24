@@ -27,6 +27,7 @@ struct SnapshotPlayer {
     float yaw = 0.0f;
     float hp = 100.0f;
     uint8_t flags = 0;
+    uint8_t files = 0;
 };
 
 struct SnapshotObject {
@@ -38,6 +39,8 @@ struct SnapshotObject {
     int holder = -1;
     uint8_t charge = 0;
     uint8_t progress = 0;
+    uint8_t aux = 0;
+    uint8_t phase = 0;
 };
 
 struct SnapshotMonster {
@@ -46,12 +49,18 @@ struct SnapshotMonster {
     float z = 0.0f;
     float yaw = 0.0f;
     uint8_t state = 0;
+    uint8_t anger = 0;
 };
 
 struct Snapshot {
     uint32_t tick = 0;
     bool baseline = false;
     uint8_t status = 0;
+    uint16_t timerSec = 0;
+    uint8_t filesNeed = 0;
+    uint8_t filesDone = 0;
+    uint8_t rage = 0;
+    uint8_t fuelNeed = 0;
     std::vector<SnapshotPlayer> players;
     std::vector<SnapshotObject> objects;
     std::vector<SnapshotMonster> monsters;
@@ -66,6 +75,8 @@ struct WelcomeObject {
     bool taken = false;
     int holder = -1;
     int charge = 0;
+    uint8_t aux = 0;
+    uint8_t phase = 0;
 };
 
 struct WelcomeData {
