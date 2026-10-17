@@ -12,6 +12,7 @@ option(SLASHCO_ENABLE_PACKAGING "Generate install rules and CPack presets" ON)
 option(SLASHCO_ENABLE_LOCAL_HOST
        "Embed the dedicated-server core into the client for in-process hosting (/host flag on mobile)"
        ON)
+option(SLASHCO_ENABLE_OPENXR "Probe OpenXR runtime at startup (VR scaffold, loader compiled in)" OFF)
 
 set(SLASHCO_ANDROID_BUILD OFF)
 if(SLASHCO_ENABLE_RAYLIB AND CMAKE_SYSTEM_NAME STREQUAL "Android")
@@ -103,9 +104,25 @@ if(SLASHCO_ENABLE_RAYLIB)
         src/client/main_client.cpp
         src/client/ClientApp.cpp
         src/client/DebugPanel.cpp
+        src/client/vr/OpenXRBackend.cpp
     )
     if(SLASHCO_ENABLE_LOCAL_HOST)
         list(APPEND CLIENT_SOURCES src/server/main_server.cpp)
+    endif()
+
+    if(SLASHCO_ENABLE_OPENXR)
+        include(FetchContent)
+        set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+        set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+        set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+        set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(BUILD_API_EXPERIMENTAL OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(openxr
+            GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK-Source.git
+            GIT_TAG release-1.0.34
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(openxr)
     endif()
 
     if(SLASHCO_ANDROID_BUILD)
@@ -128,6 +145,10 @@ if(SLASHCO_ENABLE_RAYLIB)
     target_include_directories(SlashCoClient PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                      ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(SlashCoClient PRIVATE slashco_shared raylib)
+    if(SLASHCO_ENABLE_OPENXR)
+        target_link_libraries(SlashCoClient PRIVATE openxr_loader)
+        target_compile_definitions(SlashCoClient PRIVATE SLASHCO_OPENXR=1)
+    endif()
     if(SLASHCO_ENABLE_LOCAL_HOST)
         target_compile_definitions(SlashCoClient PRIVATE SLASHCO_LOCAL_HOST=1 SLASHCO_SERVER_LIB=1)
     endif()

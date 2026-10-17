@@ -12,3 +12,6 @@ packaging/*.vdf
 packaging/android/work/
 packaging/SlashCo-*
 SlashCo-0.3.0-android-*.apk
+build-vr/
+build-dependency/
+*.log

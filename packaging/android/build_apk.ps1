@@ -1,7 +1,8 @@
 param(
     [string]$Abi = "arm64-v8a",
     [string]$OutRoot = "",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$OpenXR
 )
 # SlashCo Android APK builder (aapt2 + SHA-256 v2 signing, no gradle required).
 $ErrorActionPreference = "Stop"
@@ -79,6 +80,7 @@ if (-not $SkipBuild) {
         "-DSLASHCO_ENABLE_PACKAGING=OFF",
         "-DSLASHCO_ENABLE_LOCAL_HOST=ON"
     )
+    if ($OpenXR) { $cfg += "-DSLASHCO_ENABLE_OPENXR=ON" }
     & $cmake @cfg | Select-Object -Last 6
     if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
     & $cmake --build $out --parallel | Select-Object -Last 10

@@ -21,6 +21,7 @@ extern void slashcoServerStop();
 #include "DebugPanel.hpp"
 #include "core/Config.hpp"
 #include "core/Logger.hpp"
+#include "vr/OpenXRBackend.hpp"
 
 namespace {
 Color colorForId(int id) {
@@ -221,6 +222,15 @@ bool ClientApp::init(int argc, char** argv) {
     int width = std::stoi(core::Config::instance().get("window.width", "1280"));
     int height = std::stoi(core::Config::instance().get("window.height", "720"));
     std::string title = core::Config::instance().get("window.title", "SlashCo");
+
+    bool wantVr = true;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--no-vr") wantVr = false;
+    }
+#if defined(SLASHCO_OPENXR)
+    if (wantVr) slashco_vr::probeRuntime();
+#endif
 
     SetConfigFlags(FLAG_VSYNC_HINT);
     InitWindow(width, height, title.c_str());
