@@ -1,17 +1,6 @@
 #include "OpenXRBackend.hpp"
 
-#if defined(SLASHCO_OPENXR) && defined(_WIN32)
-
-#define XR_USE_PLATFORM_WIN32
-#define XR_USE_GRAPHICS_API_OPENGL
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <unknwn.h>
-
-#include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
+#if defined(SLASHCO_OPENXR) && (defined(_WIN32) || defined(__ANDROID__))
 
 #include <algorithm>
 #include <cmath>
@@ -24,6 +13,53 @@
 #include "rlGlue.hpp"
 #include <core/Logger.hpp>
 
+#if defined(_WIN32)
+
+#define XR_USE_PLATFORM_WIN32
+#define XR_USE_GRAPHICS_API_OPENGL
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <unknwn.h>
+
+#else  // __ANDROID__
+
+#define XR_USE_PLATFORM_ANDROID
+#define XR_USE_GRAPHICS_API_OPENGL_ES
+#include <EGL/egl.h>
+#include <android_native_app_glue.h>
+extern "C" struct android_app* GetAndroidApp(void);
+
+#endif
+
+#include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
+
+#if defined(_WIN32)
+
+constexpr const char* kVrExtName = "XR_KHR_opengl_enable";
+constexpr const char* kVrReqFnName = "xrGetOpenGLGraphicsRequirementsKHR";
+using VrSwapImage = XrSwapchainImageOpenGLKHR;
+using VrBinding = XrGraphicsBindingOpenGLWin32KHR;
+using VrReq = XrGraphicsRequirementsOpenGLKHR;
+using VrReqFn = PFN_xrGetOpenGLGraphicsRequirementsKHR;
+constexpr XrStructureType kVrSwapImgType = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR;
+constexpr XrStructureType kVrReqType = XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR;
+
+#else
+
+constexpr const char* kVrExtName = XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME;
+constexpr const char* kVrReqFnName = "xrGetOpenGLESGraphicsRequirementsKHR";
+using VrSwapImage = XrSwapchainImageOpenGLESKHR;
+using VrBinding = XrGraphicsBindingOpenGLESAndroidKHR;
+using VrReq = XrGraphicsRequirementsOpenGLESKHR;
+using VrReqFn = PFN_xrGetOpenGLESGraphicsRequirementsKHR;
+constexpr XrStructureType kVrSwapImgType = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
+constexpr XrStructureType kVrReqType = XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_ES_KHR;
+
+#endif
+
 namespace slashco_vr {
 
 namespace {
@@ -32,6 +68,7 @@ constexpr uint64_t GL_RGBA8_FMT = 0x8058ull;
 constexpr int RL_ATTACH_COLOR0 = 0;
 constexpr int RL_ATTACH_DEPTH = 100;
 constexpr int RL_TEX_TYPE_2D = 100;
+constexpr int RL_TEX_TYPE_RB = 200;
 
 struct SwapImage {
     unsigned int color = 0;
@@ -126,24 +163,47 @@ void destroyAll() {
     g_engine.frameActive = false;
 }
 
+#if defined(__ANDROID__)
+static EGLConfig currentGlConfig(EGLDisplay display, EGLContext context) {
+    EGLint configId = 0;
+    if (eglQueryContext(display, context, EGL_CONFIG_ID, &configId) != EGL_TRUE) return nullptr;
+    EGLint count = 0;
+    if (eglGetConfigs(display, nullptr, 0, &count) != EGL_TRUE || count <= 0) return nullptr;
+    std::vector<EGLConfig> cfgs(static_cast<size_t>(count));
+    if (eglGetConfigs(display, cfgs.data(), count, &count) != EGL_TRUE) return nullptr;
+    for (int i = 0; i < count; ++i) {
+        EGLint id = 0;
+        eglGetConfigAttrib(display, cfgs[i], EGL_CONFIG_ID, &id);
+        if (id == configId) return cfgs[i];
+    }
+    return nullptr;
+}
+#endif
+
 bool createInstance() {
-    uint32_t count = 0;
-    xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr);
-    std::vector<XrExtensionProperties> props(count > 0 ? count : 1);
-    for (auto& p : props) p.type = XR_TYPE_EXTENSION_PROPERTIES;
-    if (count > 0 &&
-        xrEnumerateInstanceExtensionProperties(nullptr, count, &count, props.data()) != XR_SUCCESS) {
-        setErr("extension enumeration failed");
+#if defined(__ANDROID__)
+    PFN_xrInitializeLoaderKHR initLoader = nullptr;
+    if (xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&initLoader)) != XR_SUCCESS ||
+        !initLoader) {
+        setErr("xrInitializeLoaderKHR missing");
         return false;
     }
-    bool hasGl = false;
-    for (uint32_t i = 0; i < count; ++i) {
-        if (std::strcmp(props[i].extensionName, "XR_KHR_opengl_enable") == 0) hasGl = true;
-    }
-    if (!hasGl) {
-        setErr("runtime lacks XR_KHR_opengl_enable");
+    struct android_app* app = GetAndroidApp();
+    if (!app) {
+        setErr("android_app unavailable");
         return false;
     }
+    XrLoaderInitInfoAndroidKHR li{};
+    li.type = XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR;
+    li.applicationVM = app->activity->vm;
+    li.applicationContext = app->activity->clazz;
+    XrResult lr = initLoader(reinterpret_cast<const XrLoaderInitInfoBaseHeaderKHR*>(&li));
+    if (lr != XR_SUCCESS) {
+        setErr("xrInitializeLoaderKHR failed", lr);
+        return false;
+    }
+#endif
 
     XrInstanceCreateInfo info{};
     info.type = XR_TYPE_INSTANCE_CREATE_INFO;
@@ -152,12 +212,12 @@ bool createInstance() {
     info.applicationInfo.applicationVersion = 1;
     info.applicationInfo.engineVersion = 1;
     info.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
-    const char* enabled[1] = {"XR_KHR_opengl_enable"};
+    const char* enabled[1] = {kVrExtName};
     info.enabledExtensionNames = enabled;
     info.enabledExtensionCount = 1;
     XrResult r = xrCreateInstance(&info, &g_engine.instance);
     if (r != XR_SUCCESS) {
-        setErr("no OpenXR loader found", r);
+        setErr("no VR runtime on system", r);
         return false;
     }
     return true;
@@ -169,7 +229,7 @@ bool createSystemAndSession() {
     sysInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XrResult r = xrGetSystem(g_engine.instance, &sysInfo, &g_engine.system);
     if (r != XR_SUCCESS) {
-        setErr("no HMD available", r);
+        setErr("no VR device present", r);
         return false;
     }
     XrSystemProperties sysProps{};
@@ -177,17 +237,17 @@ bool createSystemAndSession() {
     xrGetSystemProperties(g_engine.instance, g_engine.system, &sysProps);
     core::Logger::info(std::string("[VR] HMD: ") + sysProps.systemName);
 
-    PFN_xrGetOpenGLGraphicsRequirementsKHR glReq = nullptr;
-    xrGetInstanceProcAddr(g_engine.instance, "xrGetOpenGLGraphicsRequirementsKHR",
+    VrReqFn glReq = nullptr;
+    xrGetInstanceProcAddr(g_engine.instance, kVrReqFnName,
                           reinterpret_cast<PFN_xrVoidFunction*>(&glReq));
     if (glReq) {
-        XrGraphicsRequirementsOpenGLKHR req{};
-        req.type = XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR;
+        VrReq req{};
+        req.type = kVrReqType;
         glReq(g_engine.instance, g_engine.system, &req);
-        core::Logger::info("[VR] GL min version ok");
     }
 
-    XrGraphicsBindingOpenGLWin32KHR binding{};
+    VrBinding binding{};
+#if defined(_WIN32)
     binding.type = XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR;
     binding.hDC = wglGetCurrentDC();
     binding.hGLRC = wglGetCurrentContext();
@@ -195,6 +255,16 @@ bool createSystemAndSession() {
         setErr("GL context unavailable");
         return false;
     }
+#else
+    binding.type = XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR;
+    binding.display = eglGetCurrentDisplay();
+    binding.context = eglGetCurrentContext();
+    binding.config = currentGlConfig(binding.display, binding.context);
+    if (!binding.display || !binding.context) {
+        setErr("EGL context unavailable");
+        return false;
+    }
+#endif
     XrSessionCreateInfo createInfo{};
     createInfo.type = XR_TYPE_SESSION_CREATE_INFO;
     createInfo.next = &binding;
@@ -235,12 +305,28 @@ bool createSpaceAndSwapchains() {
         return false;
     }
 
+    uint32_t swWidth = 2048;
+    uint32_t swHeight = 2048;
+    XrViewConfigurationView views[2]{};
+    views[0].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+    views[1].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+    uint32_t viewCount = 0;
+    if (xrEnumerateViewConfigurationViews(g_engine.instance, g_engine.system,
+                                          XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2,
+                                          &viewCount, views) == XR_SUCCESS &&
+        viewCount > 0 && views[0].recommendedImageRectWidth > 0) {
+        swWidth = std::max<uint32_t>(views[0].recommendedImageRectWidth,
+                                     views[1].recommendedImageRectWidth);
+        swHeight = std::max<uint32_t>(views[0].recommendedImageRectHeight,
+                                      views[1].recommendedImageRectHeight);
+    }
+
     for (int eye = 0; eye < 2; ++eye) {
         XrSwapchainCreateInfo swInfo{};
         swInfo.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
         swInfo.format = chosen;
-        swInfo.width = 2048;
-        swInfo.height = 2048;
+        swInfo.width = swWidth;
+        swInfo.height = swHeight;
         swInfo.arraySize = 1;
         swInfo.mipCount = 1;
         swInfo.sampleCount = 1;
@@ -256,8 +342,8 @@ bool createSpaceAndSwapchains() {
 
         uint32_t imgCount = 0;
         xrEnumerateSwapchainImages(g_engine.swapchain[eye], 0, &imgCount, nullptr);
-        std::vector<XrSwapchainImageOpenGLKHR> imgs(imgCount > 0 ? imgCount : 1);
-        for (auto& im : imgs) im.type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR;
+        std::vector<VrSwapImage> imgs(imgCount > 0 ? imgCount : 1);
+        for (auto& im : imgs) im.type = kVrSwapImgType;
         r = xrEnumerateSwapchainImages(g_engine.swapchain[eye], imgCount, &imgCount,
                                        reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data()));
         if (r != XR_SUCCESS || imgCount == 0) {
@@ -275,7 +361,7 @@ bool createSpaceAndSwapchains() {
                                             static_cast<int>(si.height));
             glueBindFramebuffer(si.fbo);
             glueFramebufferAttach(si.fbo, si.color, RL_ATTACH_COLOR0, RL_TEX_TYPE_2D, 0);
-            glueFramebufferAttach(si.fbo, si.depth, RL_ATTACH_DEPTH, RL_TEX_TYPE_2D, 0);
+            glueFramebufferAttach(si.fbo, si.depth, RL_ATTACH_DEPTH, RL_TEX_TYPE_RB, 0);
             bool ok = glueFramebufferComplete(si.fbo);
             glueBindFramebuffer(0);
             if (!ok) {

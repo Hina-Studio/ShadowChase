@@ -40,11 +40,27 @@ phase 2 (shipped, desktop GL): session renderer
         [VR] no HMD available: XR_ERROR_FORM_FACTOR_UNAVAILABLE -> flat mode
         flat renderer, embedded server, selftests and e2e join unchanged.
 
-phase 3 (pending): quest native session
-    The android TU intentionally returns Flat for now (windows/WGL is desktop
-    only); port initSession to XR_KHR_opengles_enable + XrGraphicsBindingOpenGLESAndroidKHR
-    (EGL display/context/surface from raylib's android backend) and rebuild with
-    packaging/android/build_apk.ps1 -OpenXR. Quest packaging may additionally need
-    com.oculus.* manifest bits; PCVR/Link runs on the same desktop GL session code.
+phase 3 (shipped, code): quest native session (needs on-device test)
+    The android TU shares the same session implementation (one file, platform
+    branches): XR_KHR_opengles_enable + XrGraphicsBindingOpenGLESAndroidKHR with
+    EGL display/context pulled from the live raylib context (eglGetCurrentDisplay/
+    Context, config resolved via EGL_CONFIG_ID), XR_KHR_loader_init_android
+    binding the Java VM (GetAndroidApp) before xrCreateInstance, swapchain sizes
+    from xrEnumerateViewConfigurationViews, and depth renderbuffer attachments
+    (rlgl falls back automatically on GLES). While a session renders the eyes,
+    the hidden android window surface is not drawn (mirror block skipped on
+    __ANDROID__).
 
-    Device testing (Quest 2/3) still required.
+    verified on windows (no headset present):
+        flat renderer, embedded server, selftests and e2e join unchanged.
+    verified on android arm64-v8a (build only so far):
+        cmake+Ninja compile OK, apk re-signed (apksigner verify OK), manifest
+        contains com.samsung.android.vr.application.mode=vr_only and
+        com.oculus.intent.category.VR so Quest's launcher treats the app as
+        immersive.
+
+phase 4 (pending): quest device test + pcvr
+    Side-load the apk via adb, grant runtime perms, launch: session should spawn
+    into OpenXR (com.oculus.* loader) and the eye render path executes in-device.
+    PCVR/Link runs the same desktop GL session code on windows - just need a
+    headset once available.

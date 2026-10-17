@@ -10,7 +10,7 @@ unsigned int glueLoadFramebuffer() {
 }
 
 unsigned int glueLoadDepthTexture(int w, int h) {
-    return rlLoadTextureDepth(w, h, false);
+    return rlLoadTextureDepth(w, h, true);
 }
 
 void glueFramebufferAttach(unsigned int fbo, unsigned int tex, int attachType, int texType,

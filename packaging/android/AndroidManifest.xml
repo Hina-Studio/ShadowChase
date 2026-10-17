@@ -22,6 +22,8 @@
         android:hasCode="false"
         android:hardwareAccelerated="true">
 
+        <meta-data android:name="com.samsung.android.vr.application.mode" android:value="vr_only" />
+
         <activity
             android:name="android.app.NativeActivity"
             android:exported="true"
@@ -33,6 +35,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
             </intent-filter>
         </activity>
     </application>

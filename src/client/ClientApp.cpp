@@ -835,6 +835,7 @@ void ClientApp::renderVr() {
         slashco_vr::endFrame();
     }
 
+#if !defined(__ANDROID__)
     BeginDrawing();
     ClearBackground(Color{18, 18, 24, 255});
     float cp = static_cast<float>(std::cos(pitch_));
@@ -854,6 +855,7 @@ void ClientApp::renderVr() {
     rlImGuiEnd();
 #endif
     EndDrawing();
+#endif
 }
 
 void ClientApp::drawHud2D() {
