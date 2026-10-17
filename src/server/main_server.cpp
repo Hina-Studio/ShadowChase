@@ -13,6 +13,7 @@
 #endif
 #endif
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -25,6 +26,7 @@
 
 #include "core/Config.hpp"
 #include "core/Logger.hpp"
+#include "main_server.hpp"
 #include "shared/Protocol.hpp"
 #include "shared/Sim.hpp"
 
@@ -734,7 +736,18 @@ bool runQuestSelfTest() {
 }
 }
 
+namespace {
+std::atomic<bool> serverStopRequested{false};
+}
+
+void slashcoServerStop() { serverStopRequested.store(true); }
+
+#ifdef SLASHCO_SERVER_LIB
+int slashcoServerMain(int argc, char** argv) {
+#else
 int main(int argc, char** argv) {
+#endif
+    serverStopRequested.store(false);
     core::Config::instance().load("config.ini");
 
     int port = std::stoi(core::Config::instance().get("server.port", "7777"));
@@ -779,7 +792,7 @@ int main(int argc, char** argv) {
                        "  (client: SlashCoClient --room " + std::to_string(roomCode) + ")");
     core::Logger::info("[SERVER] running (Ctrl+C to stop)");
     auto last = std::chrono::steady_clock::now();
-    while (true) {
+    while (!serverStopRequested.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         auto now = std::chrono::steady_clock::now();
         double dt = std::chrono::duration<double>(now - last).count();

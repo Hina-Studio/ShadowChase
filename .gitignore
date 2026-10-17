@@ -1,4 +1,5 @@
 build/
+build-android-*/
 *.o
 *.obj
 replays/
@@ -8,3 +9,6 @@ packaging/steam_content/
 packaging/*.vdf
 !packaging/*.vdf.template
 .github/workflows/
+packaging/android/work/
+packaging/SlashCo-*
+SlashCo-0.3.0-android-*.apk

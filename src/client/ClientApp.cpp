@@ -12,6 +12,12 @@
 #include "rlImGui.h"
 #endif
 
+#ifdef SLASHCO_LOCAL_HOST
+#include "server/main_server.hpp"
+
+extern void slashcoServerStop();
+#endif
+
 #include "DebugPanel.hpp"
 #include "core/Config.hpp"
 #include "core/Logger.hpp"
@@ -26,12 +32,175 @@ Color colorForId(int id) {
 }
 }
 
+void ClientApp::startLocalServer() {
+#ifdef SLASHCO_LOCAL_HOST
+    if (!hostLocal_) return;
+    std::vector<std::string> args{"slashco", "--port", std::to_string(serverPort_),
+                                  "--room", std::to_string(roomCode_)};
+    std::vector<char*> argvs;
+    for (auto& s : args) argvs.push_back(const_cast<char*>(s.c_str()));
+    serverThread_ = std::thread([argvs]() {
+        char** argv = const_cast<char**>(argvs.data());
+        slashcoServerMain(static_cast<int>(argvs.size()), argv);
+    });
+    serverThread_.detach();
+    core::Logger::info("[CLIENT] local host mode: embedded server on port " +
+                       std::to_string(serverPort_));
+#endif
+}
+
+void ClientApp::pollTouch() {
+    touch_.tapDrop = false;
+    touch_.tapThrow = false;
+    touch_.tapFlash = false;
+    touch_.tapStash = false;
+    touch_.tapUnstash = false;
+    touch_.tapPanel = false;
+    if (!touch_.active) return;
+
+    float sw = static_cast<float>(GetScreenWidth());
+    float sh = static_cast<float>(GetScreenHeight());
+    float btn = std::min(sw, sh) * 0.10f;
+    float pad = btn * 0.35f;
+    float by = sh - btn - pad;
+    touch_.joyBaseX = sw * 0.16f;
+    touch_.joyBaseY = sh - btn * 2.2f - pad;
+
+    int pointCount = GetTouchPointCount();
+    touch_.joyHeld = false;
+    touch_.joyY = 0.0f;
+    touch_.joyX = 0.0f;
+    touch_.lookHeld = false;
+    touch_.interactHold = false;
+    touch_.swingFinger = -1;
+    touch_.lastFinger = -1;
+
+    for (int i = 0; i < pointCount && i < 4; ++i) {
+        Vector2 p = GetTouchPosition(i);
+
+        // buttons row: C, FLASH, THROW, DROP, PANEL
+        float rowX[5] = {sw - pad - btn * 0.55f,
+                         sw - pad - btn * 1.65f,
+                         sw - pad - btn * 2.75f,
+                         sw - pad - btn * 3.85f,
+                         sw - pad - btn * 4.95f};
+        static const char* rowTags[5] = {"C", "FLSH", "THRW", "DROP", "PANEL"};
+        bool consumed = false;
+        for (int k = 0; k < 5; ++k) {
+            float dxs = p.x - rowX[k];
+            float dys = p.y - by;
+            if (dxs * dxs + dys * dys <= btn * btn) {
+                switch (rowTags[k][0]) {
+                    case 'C': touch_.crouchToggle = !touch_.crouchToggle; break;
+                    case 'F': touch_.tapFlash = true; break;
+                    case 'T': touch_.tapThrow = true; break;
+                    case 'D': touch_.tapDrop = true; break;
+                    default: touch_.tapPanel = true; break;
+                }
+                consumed = true;
+                break;
+            }
+        }
+        if (consumed) continue;
+
+        if (p.x > sw * 0.68f && p.y > sh * 0.52f) {
+            touch_.interactHold = true;
+            continue;
+        }
+        if (p.x <= sw * 0.42f && p.y > sh * 0.35f) {
+            touch_.joyHeld = true;
+            touch_.swingFinger = i;
+            float dx = p.x - touch_.joyBaseX;
+            float dy = p.y - touch_.joyBaseY;
+            float len = std::sqrt(dx * dx + dy * dy);
+            float maxR = btn * 2.0f;
+            touch_.joyX = len > maxR ? dx / len : dx / maxR;
+            touch_.joyY = len > maxR ? dy / len : dy / maxR;
+            continue;
+        }
+        touch_.lookHeld = true;
+        touch_.lastFinger = i;
+    }
+
+    if (touch_.lookHeld) {
+        Vector2 cur = GetTouchPosition(touch_.lastFinger);
+        if (!touch_.prevLookHeld) {
+            touch_.lastX = cur.x;
+            touch_.lastY = cur.y;
+        } else {
+            yaw_ -= (cur.x - touch_.lastX) * 0.0032f;
+            pitch_ -= (cur.y - touch_.lastY) * 0.0032f;
+            touch_.lastX = cur.x;
+            touch_.lastY = cur.y;
+        }
+    }
+    touch_.prevLookHeld = touch_.lookHeld;
+
+    if (touch_.joyHeld && touch_.swingFinger >= 0) {
+        (void)GetTouchPosition(touch_.swingFinger);
+    }
+}
+
+void ClientApp::drawTouchUI() {
+    if (!touch_.active) return;
+    float sw = static_cast<float>(GetScreenWidth());
+    float sh = static_cast<float>(GetScreenHeight());
+    float btn = std::min(sw, sh) * 0.10f;
+    float pad = btn * 0.35f;
+    float by = sh - btn - pad;
+    float rowX[5] = {sw - pad - btn * 0.55f,
+                     sw - pad - btn * 1.65f,
+                     sw - pad - btn * 2.75f,
+                     sw - pad - btn * 3.85f,
+                     sw - pad - btn * 4.95f};
+    static const char* rowTags[5] = {"C", "FLSH", "THRW", "DROP", "PANEL"};
+    Color rowCol[5] = {touch_.crouchToggle ? Color{90, 220, 130, 230} : Color{30, 30, 40, 200},
+                       flashlight_ ? Color{255, 220, 120, 230} : Color{30, 30, 40, 200},
+                       Color{30, 30, 40, 200},
+                       Color{30, 30, 40, 200},
+                       showPanel_ ? Color{90, 220, 130, 230} : Color{30, 30, 40, 200}};
+    for (int i = 0; i < 5; ++i) {
+        DrawCircle(static_cast<int>(rowX[i]), static_cast<int>(by), static_cast<int>(btn),
+                   rowCol[i]);
+        DrawCircleLines(static_cast<int>(rowX[i]), static_cast<int>(by), static_cast<int>(btn),
+                        Color{200, 200, 220, 160});
+        int tw = MeasureText(rowTags[i], 16);
+        DrawText(rowTags[i], static_cast<int>(rowX[i] - tw / 2.0f),
+                 static_cast<int>(by - 9), 16, Color{220, 220, 235, 230});
+    }
+
+    DrawCircle(static_cast<int>(touch_.joyBaseX), static_cast<int>(touch_.joyBaseY),
+               static_cast<int>(btn * 2),
+               touch_.joyHeld ? Color{60, 60, 80, 150} : Color{30, 30, 40, 110});
+    DrawCircleLines(static_cast<int>(touch_.joyBaseX), static_cast<int>(touch_.joyBaseY),
+                    static_cast<int>(btn * 2), Color{200, 200, 220, 120});
+    float knobX = touch_.joyBaseX + touch_.joyX * btn * 1.6f;
+    float knobY = touch_.joyBaseY + touch_.joyY * btn * 1.6f;
+    DrawCircle(static_cast<int>(knobX), static_cast<int>(knobY), static_cast<int>(btn * 0.7f),
+               Color{200, 80, 80, 220});
+
+    DrawCircle(static_cast<int>(sw - btn * 1.9f), static_cast<int>(sh - btn * 2.6f),
+               static_cast<int>(btn * 1.5f),
+               touch_.interactHold ? Color{90, 220, 130, 190} : Color{30, 30, 40, 140});
+    DrawCircleLines(static_cast<int>(sw - btn * 1.9f), static_cast<int>(sh - btn * 2.6f),
+                    static_cast<int>(btn * 1.5f), Color{220, 220, 235, 170});
+    const char* useLabel = "USE";
+    int uw = MeasureText(useLabel, 22);
+    DrawText(useLabel, static_cast<int>(sw - btn * 1.9f - uw / 2.0f),
+             static_cast<int>(sh - btn * 2.6f - 12), 22, Color{240, 240, 250, 235});
+}
+
+bool ClientApp::crouchActive() const {
+    return IsKeyDown(KEY_C) || touch_.crouchToggle;
+}
+
 bool ClientApp::init(int argc, char** argv) {
     core::Config::instance().load("config.ini");
     serverAddr_ = core::Config::instance().get("client.server", "127.0.0.1:7777");
     playerName_ = core::Config::instance().get("client.name", "Player");
     roomCode_ = static_cast<uint32_t>(
         std::stoul(core::Config::instance().get("client.room", "0")));
+    hostLocal_ = std::stoi(core::Config::instance().get("client.host", "0")) != 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -57,9 +226,18 @@ bool ClientApp::init(int argc, char** argv) {
     InitWindow(width, height, title.c_str());
     SetTargetFPS(144);
     DisableCursor();
+
+    touch_.active = std::stoi(core::Config::instance().get("ui.touch", "0")) != 0;
+#if defined(__ANDROID__)
+    touch_.active = true;
+#endif
+    if (touch_.active) showPanel_ = false;
+
 #ifdef SLASHCO_IMGUI
     rlImGuiSetup(true);
 #endif
+
+    startLocalServer();
 
     if (enet_initialize() != 0) {
         core::Logger::error("[CLIENT] enet init failed");
@@ -215,15 +393,34 @@ void ClientApp::sendInput(double dt) {
 
     double fwd = (IsKeyDown(KEY_W) ? 1.0 : 0.0) - (IsKeyDown(KEY_S) ? 1.0 : 0.0);
     double side = (IsKeyDown(KEY_D) ? 1.0 : 0.0) - (IsKeyDown(KEY_A) ? 1.0 : 0.0);
-    bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
-    bool interact = IsKeyDown(KEY_E) || IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-    bool drop = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !IsKeyDown(KEY_F);
-    bool throwItem = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && IsKeyPressed(KEY_F);
-    bool crouch = IsKeyDown(KEY_C);
-    bool stash = IsKeyPressed(KEY_H);
-    bool unstash = IsKeyPressed(KEY_G);
+    bool sprint = IsKeyDown(KEY_LEFT_SHIFT) || touch_.sprintToggle;
+    bool interact = (!touch_.active && (IsKeyDown(KEY_E) || IsMouseButtonDown(MOUSE_BUTTON_LEFT))) ||
+                    touch_.interactHold;
+    bool drop = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !IsKeyDown(KEY_F) && !touch_.active;
+    bool throwItem = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && IsKeyPressed(KEY_F) && !touch_.active;
+    bool crouch = IsKeyDown(KEY_C) || touch_.crouchToggle;
+    bool stash = !touch_.active && IsKeyPressed(KEY_H);
+    bool unstash = !touch_.active && IsKeyPressed(KEY_G);
     bool dropAll = false;
 
+    if (touch_.active) {
+        fwd += -touch_.joyY;
+        side += touch_.joyX;
+        if (touch_.tapDrop) {
+            altCount_ += 1;
+            altTimer_ = 1.0;
+            if (altCount_ >= 3) {
+                dropAll = true;
+                altCount_ = 0;
+            } else {
+                drop = true;
+            }
+        }
+        if (touch_.tapThrow) throwItem = true;
+        if (touch_.tapFlash) flashlight_ = !flashlight_;
+        stash = touch_.tapStash;
+        unstash = touch_.tapUnstash;
+    }
     if (IsKeyPressed(KEY_LEFT_ALT) || IsKeyPressed(KEY_RIGHT_ALT)) {
         altCount_ += 1;
         altTimer_ = 1.0;
@@ -232,7 +429,7 @@ void ClientApp::sendInput(double dt) {
             altCount_ = 0;
         }
     }
-    if (IsKeyPressed(KEY_F) && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+    if (!touch_.active && IsKeyPressed(KEY_F) && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
         flashlight_ = !flashlight_;
     }
     if (altTimer_ > 0.0) {
@@ -277,9 +474,11 @@ void ClientApp::sendInput(double dt) {
 }
 
 void ClientApp::updateLocal(double dt) {
-    Vector2 md = GetMouseDelta();
-    yaw_ -= md.x * 0.003;
-    pitch_ -= md.y * 0.003;
+    if (!touch_.active) {
+        Vector2 md = GetMouseDelta();
+        yaw_ -= md.x * 0.003;
+        pitch_ -= md.y * 0.003;
+    }
 
     if (IsGamepadAvailable(0)) {
         yaw_ -= GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_X) * 2.4 * dt;
@@ -300,6 +499,12 @@ void ClientApp::updateLocal(double dt) {
         side += GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
         sprint = sprint || IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_2);
         crouch = crouch || IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT);
+    }
+    if (touch_.active) {
+        fwd += -touch_.joyY;
+        side += touch_.joyX;
+        sprint = touch_.sprintToggle;
+        crouch = crouch || touch_.crouchToggle;
     }
     fwd = std::max(-1.0, std::min(1.0, fwd));
     side = std::max(-1.0, std::min(1.0, side));
@@ -359,7 +564,7 @@ std::string ClientApp::interactionPrompt() const {
     }
     if (!anyGen) gensPowered = false;
 
-    bool crouched = IsKeyDown(KEY_C);
+    bool crouched = crouchActive();
     auto reachFor = [&](uint8_t type) {
         bool low = type == static_cast<uint8_t>(sc::ObjType::FuelCan) ||
                    type == static_cast<uint8_t>(sc::ObjType::Battery) ||
@@ -723,6 +928,7 @@ void ClientApp::render() {
 
     DrawText("WASD move  SHIFT sprint  E interact  F1 panel  ESC quit", 12,
              GetScreenHeight() - 26, 16, Color{180, 180, 190, 255});
+    drawTouchUI();
 
 #ifdef SLASHCO_IMGUI
     rlImGuiBegin();
@@ -743,6 +949,8 @@ void ClientApp::run() {
         }
         double dt = GetFrameTime();
         if (dt > 0.1) dt = 0.1;
+        pollTouch();
+        if (touch_.tapPanel) showPanel_ = !showPanel_;
         handleEvents();
         sendInput(dt);
         updateLocal(dt);
@@ -768,6 +976,12 @@ void ClientApp::shutdown() {
         host_ = nullptr;
     }
     enet_deinitialize();
+#ifdef SLASHCO_LOCAL_HOST
+    if (hostLocal_) {
+        slashcoServerStop();
+        if (serverThread_.joinable()) serverThread_.join();
+    }
+#endif
 #ifdef SLASHCO_IMGUI
     rlImGuiShutdown();
 #endif

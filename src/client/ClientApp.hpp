@@ -1,6 +1,8 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -61,6 +63,30 @@ struct ClientDebugState {
     bool padActive = false;
 };
 
+struct TouchUIState {
+    bool active = false;        // device is driven by touch controls
+    bool joyHeld = false;       // left-half movement stick
+    float joyBaseX = 0.0f;
+    float joyBaseY = 0.0f;
+    float joyX = 0.0f;          // -1..1
+    float joyY = 0.0f;          // -1..1 (fwd = -Y)
+    bool lookHeld = false;      // right-half drag rotates camera
+    float lastX = 0.0f;
+    float lastY = 0.0f;
+    bool sprintToggle = false;
+    bool crouchToggle = false;
+    bool interactHold = false;  // [E] held
+    bool tapDrop = false;
+    bool tapThrow = false;
+    bool tapFlash = false;
+    bool tapStash = false;
+    bool tapUnstash = false;
+    bool tapPanel = false;
+    bool prevLookHeld = false;
+    int swingFinger = -1;       // finger id driving the stick
+    int lastFinger = -1;        // finger id driving the look drag
+};
+
 class ClientApp {
 public:
     bool init(int argc, char** argv);
@@ -72,8 +98,12 @@ private:
     void sendInput(double dt);
     void updateLocal(double dt);
     void render();
+    void pollTouch();
+    void drawTouchUI();
+    void startLocalServer();
     void rebuildDynamicGrid();
     std::string interactionPrompt() const;
+    bool crouchActive() const;
 
     ENetHost* host_ = nullptr;
     ENetPeer* peer_ = nullptr;
@@ -115,4 +145,8 @@ private:
     double altTimer_ = 0.0;
     bool flashlight_ = false;
     ClientDebugState dbg_;
+    TouchUIState touch_;
+
+    bool hostLocal_ = false;
+    std::thread serverThread_;
 };
