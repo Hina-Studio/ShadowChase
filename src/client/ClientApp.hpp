@@ -87,6 +87,8 @@ struct TouchUIState {
     int lastFinger = -1;        // finger id driving the look drag
 };
 
+struct Camera3D;
+
 class ClientApp {
 public:
     bool init(int argc, char** argv);
@@ -98,6 +100,9 @@ private:
     void sendInput(double dt);
     void updateLocal(double dt);
     void render();
+    void renderVr();
+    void drawScene(const Camera3D& cam);
+    void drawHud2D();
     void pollTouch();
     void drawTouchUI();
     void startLocalServer();
@@ -149,4 +154,5 @@ private:
 
     bool hostLocal_ = false;
     std::thread serverThread_;
+    bool vrPrevSqueeze_ = false;
 };

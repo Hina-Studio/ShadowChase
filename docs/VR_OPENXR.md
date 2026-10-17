@@ -3,24 +3,48 @@ openxr / quest milestone
 
 SLASHCO_ENABLE_OPENXR: FetchContent(OpenXR-SDK-Source, release-1.0.34) builds the
 Khronos loader statically and links it into both desktop and android client targets.
-At start the game calls slashco_vr::probeRuntime() (src/client/vr/OpenXRBackend.cpp):
 
-    Windows desktop, no headset  -> [VR] OpenXR xrCreateInstance failed (flat mode)
-    Windows desktop w/ runtime   -> [VR] runtime=VirtualDesktopXR / OVR / OpenXR … flat mode
-    Quest (same APK)             -> uses the system OpenXR loader; runtime auto-bound.
+phase 1 (shipped): runtime detection
+    --no-vr forces the flat renderer; otherwise the game tries a real session.
+    Fallback is automatic: if the runtime can't give an HMD system
+    (XR_ERROR_FORM_FACTOR_UNAVAILABLE), the UI stays in the normal flat renderer.
 
-Fallback behaviour is automatic: if a runtime can't give us an HMD system
-(XR_ERROR_…), the UI stays in the normal flat renderer.
+phase 2 (shipped, desktop GL): session renderer
+    src\client\vr\OpenXRBackend.cpp implements the full pipeline behind a small API:
+    initSession / beginFrame / endFrame / bindEye / unbindEye / getEyePose / input.
 
-VI packing/build is already done:
+    instance        : XR_KHR_opengl_enable
+    system          : HMD display form factor (flat fallback otherwise)
+    session         : XrGraphicsBindingOpenGLWin32KHR with wglGetCurrentDC/Context
+    reference space : XR_REFERENCE_SPACE_TYPE_LOCAL
+    swapchains      : one per eye, 2048x2048, GL_RGBA8 or first supported format
+    framebuffers    : per swapchain image - rlLoadFramebuffer + attached external
+                      color texture + rlLoadTextureDepth, validated with
+                      rlFramebufferComplete (see src\client\vr\rlGlue.cpp, a
+                      raylib-only TU so the OpenXR TU never pulls wingdi/GDI
+                      names into the same translation unit as raylib)
+    frame loop      : pollEvents (auto-begins session on SESSION_STATE_READY),
+                      xrWaitFrame -> xrBeginFrame -> syncActions -> xrLocateViews,
+                      then per eye: acquire/wait image -> bindEye -> drawScene ->
+                      unbindEye, then endFrame submits an
+                      XrCompositionLayerProjection with both views
+    input           : action set "slashco" - left/right thumbstick (vector2f) +
+                      trigger/squeeze (bool); suggested bindings for oculus touch,
+                      ms motion and valve index profiles; merged into ClientApp
+                      sendInput/updateLocal (left thumb = move, right thumb = look,
+                      trigger = interact, squeeze = drop)
+    monitor view    : while the session renders the eyes, the desktop window keeps
+                      mirroring the flat camera + drawHud2D for spectators
 
-    packaging/android/build_apk.ps1 -OpenXR      # Android (arm64-v8a) with loader
+    verified on windows (no headset present):
+        [VR] no HMD available: XR_ERROR_FORM_FACTOR_UNAVAILABLE -> flat mode
+        flat renderer, embedded server, selftests and e2e join unchanged.
 
-The next VR milestone is the actual OpenXR renderer:
+phase 3 (pending): quest native session
+    The android TU intentionally returns Flat for now (windows/WGL is desktop
+    only); port initSession to XR_KHR_opengles_enable + XrGraphicsBindingOpenGLESAndroidKHR
+    (EGL display/context/surface from raylib's android backend) and rebuild with
+    packaging/android/build_apk.ps1 -OpenXR. Quest packaging may additionally need
+    com.oculus.* manifest bits; PCVR/Link runs on the same desktop GL session code.
 
-1) xrGetVulkanGraphicsRequirementsKHR / OpenGLES Android binding (Quest native),
-2) swapchain creation (two-view FBO in raylib offscreen RenderTextures),
-3) game-loop: xrWaitFrame/xrBeginFrame/xrLocateViews → render StereoCamera3D per eye
-   with ClientApp's raylib renderer + controllers via xrSuggestInteractionProfileBindings,
-4) Quest: need meta's extra Android runtime checks (com.oculus.* mania) + PCVR link.
-Hands-on device testing still required.
+    Device testing (Quest 2/3) still required.

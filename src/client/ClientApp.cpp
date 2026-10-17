@@ -31,7 +31,26 @@ Color colorForId(int id) {
     };
     return palette[static_cast<size_t>(std::abs(id)) % 6];
 }
+
+Camera3D eyeCameraFromPose(const slashco_vr::EyePose& ep, double x, double z) {
+    double m02 = 2.0 * ep.qx * ep.qz + 2.0 * ep.qy * ep.qw;
+    double m12 = 2.0 * ep.qy * ep.qz - 2.0 * ep.qx * ep.qw;
+    double m22 = 1.0 - 2.0 * ep.qx * ep.qx - 2.0 * ep.qy * ep.qy;
+    Vector3 fwd{static_cast<float>(-m02), static_cast<float>(-m12), static_cast<float>(-m22)};
+    if (std::fabs(fwd.x) + std::fabs(fwd.y) + std::fabs(fwd.z) < 1e-6f) {
+        fwd = Vector3{0.0f, 0.0f, -1.0f};
+    }
+    float fovy = (ep.fovUp + ep.fovDown) * 57.29578f;
+    if (fovy < 2.0f) fovy = 72.0f;
+    Camera3D cam{};
+    cam.position = Vector3{static_cast<float>(x), 1.65f, static_cast<float>(z)};
+    cam.target = Vector3{cam.position.x + fwd.x, cam.position.y + fwd.y, cam.position.z + fwd.z};
+    cam.up = Vector3{0.0f, 1.0f, 0.0f};
+    cam.fovy = fovy;
+    cam.projection = CAMERA_PERSPECTIVE;
+    return cam;
 }
+}  // namespace
 
 void ClientApp::startLocalServer() {
 #ifdef SLASHCO_LOCAL_HOST
@@ -228,14 +247,19 @@ bool ClientApp::init(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--no-vr") wantVr = false;
     }
-#if defined(SLASHCO_OPENXR)
-    if (wantVr) slashco_vr::probeRuntime();
-#endif
-
     SetConfigFlags(FLAG_VSYNC_HINT);
     InitWindow(width, height, title.c_str());
     SetTargetFPS(144);
     DisableCursor();
+
+#if defined(SLASHCO_OPENXR)
+    if (wantVr) {
+        slashco_vr::VrMode vr = slashco_vr::initSession();
+        if (vr == slashco_vr::VrMode::Flat) {
+            core::Logger::info("[VR] flat mode (no usable headset)");
+        }
+    }
+#endif
 
     touch_.active = std::stoi(core::Config::instance().get("ui.touch", "0")) != 0;
 #if defined(__ANDROID__)
@@ -458,6 +482,16 @@ void ClientApp::sendInput(double dt) {
         dbg_.padActive = false;
     }
 
+    if (slashco_vr::active()) {
+        slashco_vr::VrInput vr = slashco_vr::input();
+        fwd += vr.moveY;
+        side += vr.moveX;
+        interact = interact || vr.triggerPressed;
+        if (vr.squeezePressed && !vrPrevSqueeze_) drop = true;
+        vrPrevSqueeze_ = vr.squeezePressed;
+    }
+    if (!slashco_vr::active() && !IsGamepadAvailable(0)) vrPrevSqueeze_ = false;
+
     fwd = std::max(-1.0, std::min(1.0, fwd));
     side = std::max(-1.0, std::min(1.0, side));
 
@@ -494,6 +528,13 @@ void ClientApp::updateLocal(double dt) {
         yaw_ -= GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_X) * 2.4 * dt;
         pitch_ -= GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_Y) * 1.8 * dt;
     }
+#if defined(SLASHCO_OPENXR)
+    if (slashco_vr::active()) {
+        slashco_vr::VrInput vr = slashco_vr::input();
+        yaw_ -= vr.lookX * 2.4 * dt;
+        pitch_ -= vr.lookY * 1.8 * dt;
+    }
+#endif
     if (pitch_ > 1.45) pitch_ = 1.45;
     if (pitch_ < -1.45) pitch_ = -1.45;
 
@@ -516,6 +557,13 @@ void ClientApp::updateLocal(double dt) {
         sprint = touch_.sprintToggle;
         crouch = crouch || touch_.crouchToggle;
     }
+#if defined(SLASHCO_OPENXR)
+    if (slashco_vr::active()) {
+        slashco_vr::VrInput vrIn = slashco_vr::input();
+        fwd += vrIn.moveY;
+        side += vrIn.moveX;
+    }
+#endif
     fwd = std::max(-1.0, std::min(1.0, fwd));
     side = std::max(-1.0, std::min(1.0, side));
 
@@ -664,23 +712,9 @@ std::string ClientApp::interactionPrompt() const {
     return prompt;
 }
 
-void ClientApp::render() {
+void ClientApp::drawScene(const Camera3D& cam) {
     double worldW = mapCols_ > 0 ? mapCols_ * cell_ : 48.0;
     double worldH = mapRows_ > 0 ? mapRows_ * cell_ : 48.0;
-    Vector3 eye{static_cast<float>(predicted_.x), 1.65f, static_cast<float>(predicted_.z)};
-    float cp = static_cast<float>(std::cos(pitch_));
-    Vector3 fwd{static_cast<float>(std::sin(yaw_)) * cp, static_cast<float>(std::sin(pitch_)),
-                static_cast<float>(std::cos(yaw_)) * cp};
-
-    BeginDrawing();
-    ClearBackground(Color{18, 18, 24, 255});
-
-    Camera3D cam{};
-    cam.position = eye;
-    cam.target = Vector3{eye.x + fwd.x, eye.y + fwd.y, eye.z + fwd.z};
-    cam.up = Vector3{0.0f, 1.0f, 0.0f};
-    cam.fovy = 72.0f;
-    cam.projection = CAMERA_PERSPECTIVE;
 
     BeginMode3D(cam);
     DrawPlane(Vector3{static_cast<float>(worldW / 2.0), 0.0f, static_cast<float>(worldH / 2.0)},
@@ -785,7 +819,44 @@ void ClientApp::render() {
         DrawCapsuleWires(a, b, 0.5f, 8, 8, Color{60, 20, 20, 255});
     }
     EndMode3D();
+}
 
+void ClientApp::renderVr() {
+    bool rendered = slashco_vr::beginFrame();
+    if (rendered) {
+        for (int eye = 0; eye < 2; ++eye) {
+            if (!slashco_vr::bindEye(eye)) continue;
+            slashco_vr::EyePose ep;
+            slashco_vr::getEyePose(eye, &ep);
+            Camera3D cam = eyeCameraFromPose(ep, predicted_.x, predicted_.z);
+            drawScene(cam);
+            slashco_vr::unbindEye(eye);
+        }
+        slashco_vr::endFrame();
+    }
+
+    BeginDrawing();
+    ClearBackground(Color{18, 18, 24, 255});
+    float cp = static_cast<float>(std::cos(pitch_));
+    Vector3 fwd{static_cast<float>(std::sin(yaw_)) * cp, static_cast<float>(std::sin(pitch_)),
+                static_cast<float>(std::cos(yaw_)) * cp};
+    Camera3D cam{};
+    cam.position = Vector3{static_cast<float>(predicted_.x), 1.65f, static_cast<float>(predicted_.z)};
+    cam.target = Vector3{cam.position.x + fwd.x, cam.position.y + fwd.y, cam.position.z + fwd.z};
+    cam.up = Vector3{0.0f, 1.0f, 0.0f};
+    cam.fovy = 72.0f;
+    cam.projection = CAMERA_PERSPECTIVE;
+    drawScene(cam);
+    drawHud2D();
+#ifdef SLASHCO_IMGUI
+    rlImGuiBegin();
+    client_debug::drawPanel(dbg_, showPanel_);
+    rlImGuiEnd();
+#endif
+    EndDrawing();
+}
+
+void ClientApp::drawHud2D() {
     DrawLine(GetScreenWidth() / 2 - 8, GetScreenHeight() / 2, GetScreenWidth() / 2 + 8,
              GetScreenHeight() / 2, Color{230, 230, 230, 200});
     DrawLine(GetScreenWidth() / 2, GetScreenHeight() / 2 - 8, GetScreenWidth() / 2,
@@ -939,13 +1010,31 @@ void ClientApp::render() {
     DrawText("WASD move  SHIFT sprint  E interact  F1 panel  ESC quit", 12,
              GetScreenHeight() - 26, 16, Color{180, 180, 190, 255});
     drawTouchUI();
+}
 
+void ClientApp::render() {
+    if (slashco_vr::active()) {
+        renderVr();
+        return;
+    }
+    BeginDrawing();
+    ClearBackground(Color{18, 18, 24, 255});
+    float cp = static_cast<float>(std::cos(pitch_));
+    Vector3 fwd{static_cast<float>(std::sin(yaw_)) * cp, static_cast<float>(std::sin(pitch_)),
+                static_cast<float>(std::cos(yaw_)) * cp};
+    Camera3D cam{};
+    cam.position = Vector3{static_cast<float>(predicted_.x), 1.65f, static_cast<float>(predicted_.z)};
+    cam.target = Vector3{cam.position.x + fwd.x, cam.position.y + fwd.y, cam.position.z + fwd.z};
+    cam.up = Vector3{0.0f, 1.0f, 0.0f};
+    cam.fovy = 72.0f;
+    cam.projection = CAMERA_PERSPECTIVE;
+    drawScene(cam);
+    drawHud2D();
 #ifdef SLASHCO_IMGUI
     rlImGuiBegin();
     client_debug::drawPanel(dbg_, showPanel_);
     rlImGuiEnd();
 #endif
-
     EndDrawing();
 }
 

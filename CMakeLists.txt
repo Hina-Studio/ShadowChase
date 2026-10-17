@@ -105,6 +105,7 @@ if(SLASHCO_ENABLE_RAYLIB)
         src/client/ClientApp.cpp
         src/client/DebugPanel.cpp
         src/client/vr/OpenXRBackend.cpp
+        src/client/vr/rlGlue.cpp
     )
     if(SLASHCO_ENABLE_LOCAL_HOST)
         list(APPEND CLIENT_SOURCES src/server/main_server.cpp)
